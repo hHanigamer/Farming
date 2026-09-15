@@ -19,7 +19,7 @@ from baleio.utils import InlineKeyboardBuilder
 # ==================== تنظیمات ====================
 TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
-    raise ValueError("BOT_TOKEN تنظیم نشده! لطفاً Secret را در گیت‌هاب بساز.")
+    raise ValueError("BOT_TOKEN تنظیم نشده!")
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "WALLET-TEST-1111111111111111")
 DATA_FILE = "data.json"
 BACKUP_FILE = "data_backup.json"
@@ -56,7 +56,6 @@ PRESTIGE_PRICES = {1: 50_000_000_000, 2: 100_000_000_000, 3: 200_000_000_000,
                    7: 1_500_000_000_000, 8: 2_500_000_000_000,
                    9: 5_000_000_000_000, 10: 10_000_000_000_000}
 
-# قیمت‌های فروشگاه سکه
 SHOP_PRICES = {
     4: {5000: 114000, 10000: 228000, 20000: 456000, 50000: 1140000, 70000: 1600000, 100000: 2280000},
     5: {5000: 5700000, 10000: 11400000, 20000: 22800000, 50000: 57000000, 70000: 80000000, 100000: 114000000},
@@ -64,14 +63,18 @@ SHOP_PRICES = {
     7: {5000: 25650000000, 10000: 51300000000, 20000: 102600000000, 50000: 256500000000, 70000: 360000000000, 100000: 513000000000},
 }
 
+# ✅ ظرفیت انبار بر اساس لول
+INVENTORY_CAPACITY = {1: 1, 2: 2, 3: 3, 4: 5, 5: 8, 6: 12, 7: 20}
+# ✅ قیمت زمین‌های اضافی (دوم، سوم، چهارم، پنجم)
+LAND_PRICES = [5000, 150000, 6000000, 100000000]
+MAX_PLOTS = 5
+
 SEASON_CYCLE = ["spring", "summer", "autumn", "winter"]
 SEASON_DURATION_MIN = 45
 SEASON_FA = {"spring": "🌸 بهار", "summer": "☀️ تابستان", "autumn": "🍂 پاییز", "winter": "❄️ زمستان"}
 
-# ==================== پت ققنوس (فقط فروشگاه) ====================
 PHOENIX_PET = {"name": "ققنوس", "emoji": "🦅", "type": "sell", "value": 100}
 
-# ==================== تخم‌های پت ====================
 PET_EGGS = {
     "common": {"price": 50, "name": "معمولی 🥚", "pets": [
         {"name": "مرغ", "emoji": "🐔", "chance": 40, "type": "sell", "value": 2},
@@ -111,18 +114,15 @@ PET_EGGS = {
     ]},
 }
 
-# ==================== کلن ====================
 CLAN_CREATE_COST = 500000
 CLAN_LEVEL_COSTS = {1: 0, 2: 1000000, 3: 5000000, 4: 25000000, 5: 100000000,
                     6: 500000000, 7: 2500000000, 8: 10000000000,
                     9: 50000000000, 10: 250000000000}
 CLAN_MAX_MEMBERS = {1: 10, 2: 10, 3: 15, 4: 15, 5: 20, 6: 25, 7: 30, 8: 40, 9: 45, 10: 50}
 CLAN_BONUS_PER_LEVEL = 2
-
 LEAGUE_FA = {0: "I", 1: "II", 2: "III", 3: "IV", 4: "V", 5: "VI",
              6: "VII", 7: "VIII", 8: "IX", 9: "X", 10: "XI"}
 
-# ==================== FSM ====================
 class UserForm(StatesGroup):
     name = State()
     gift_target = State()
@@ -131,72 +131,73 @@ class UserForm(StatesGroup):
     clan_invite = State()
     clan_donate = State()
     clan_chat = State()
+    plant_plot = State()
 
 # ==================== دیتابیس ====================
 def create_default_data():
-    return {
-        "game_start_time": datetime.now().isoformat(),
-        "users": {},
-        "leaderboard": [],
-        "clans": {},
-        "leagues": {},
-    }
+    return {"game_start_time": datetime.now().isoformat(), "users": {},
+            "leaderboard": [], "clans": {}, "leagues": {}}
 
 def create_default_user(user_id):
     now = datetime.now().isoformat()
     return {
         "name": "", "level": 1, "xp": 0, "coins": 1,
-        "state": "idle", "current_fruit": 0, "inventory": [],
-        "harvest_time": None,
+        "plots": [{"fruit": 0, "state": "idle", "harvest_time": None}],
+        "max_plots": 1,
+        "current_fruit": 0,
+        "inventory": {},  # ✅ dict: {"توت‌فرنگی": 2, "طلایی_سیب": 1}
         "upgrades": {"auto_water": 0, "golden_pot": 0, "professional_seeder": 0},
         "worker": {"level": 1, "active": False},
         "daily_orders": {"date": "", "orders": [], "completed": False},
         "prestige": 0, "prestige_multiplier": 1.0,
         "gifts_given": 0, "gifts_received": 0,
         "referral_code": f"REF{user_id}{random.randint(100,999)}",
-        "pet": None,
-        "phoenix_owned": False,  # ✅ مالکیت ققنوس
-        "clan_id": None,
-        "period_start_coins": 1,
-        "period_start_time": now,
-        "current_period": 1,
-        "last_seen_period": 1,
-        "achievements": [],
-        "pending_purchase": None,  # ✅ خرید در انتظار پرداخت
+        "pet": None, "phoenix_owned": False, "clan_id": None,
+        "period_start_coins": 1, "period_start_time": now,
+        "current_period": 1, "last_seen_period": 1,
+        "achievements": [], "pending_purchase": None,
     }
 
 def _ensure_keys(data):
     if not isinstance(data, dict):
         return create_default_data()
-    defaults = create_default_data()
-    for k, v in defaults.items():
+    for k, v in create_default_data().items():
         if k not in data:
             data[k] = v
     return data
 
-def _migrate_user(u, game_start_time):
-    if "period_start_coins" not in u:
-        u["period_start_coins"] = 1
-    if "period_start_time" not in u:
-        u["period_start_time"] = game_start_time
-    if "current_period" not in u:
-        u["current_period"] = 1
-    if "last_seen_period" not in u:
-        u["last_seen_period"] = 1
-    if "achievements" not in u:
-        u["achievements"] = []
-    if "pet" not in u:
-        u["pet"] = None
-    if "clan_id" not in u:
-        u["clan_id"] = None
-    if "harvest_time" not in u:
-        if u.get("state") == "growing":
-            u["state"] = "harvested"
-        u["harvest_time"] = None
-    if "phoenix_owned" not in u:
-        u["phoenix_owned"] = False
-    if "pending_purchase" not in u:
-        u["pending_purchase"] = None
+def _migrate_user(u, gst):
+    # تبدیل inventory از list به dict
+    inv = u.get("inventory", [])
+    if isinstance(inv, list):
+        new_inv = {}
+        for item in inv:
+            new_inv[item] = new_inv.get(item, 0) + 1
+        u["inventory"] = new_inv
+    elif not isinstance(inv, dict):
+        u["inventory"] = {}
+    
+    # تبدیل state قدیمی به plots
+    if "plots" not in u:
+        old_fruit = u.get("current_fruit", 0)
+        old_state = u.get("state", "idle")
+        old_ht = u.get("harvest_time")
+        u["plots"] = [{"fruit": old_fruit, "state": old_state, "harvest_time": old_ht}]
+        u["max_plots"] = 1
+    # حذف فیلدهای قدیمی
+    for k in ["state", "harvest_time"]:
+        u.pop(k, None)
+    
+    defaults = {
+        "max_plots": 1, "current_fruit": 0, "pet": None, "phoenix_owned": False,
+        "clan_id": None, "achievements": [], "pending_purchase": None,
+        "period_start_coins": 1, "period_start_time": gst,
+        "current_period": 1, "last_seen_period": 1,
+        "gifts_given": 0, "gifts_received": 0,
+    }
+    for k, v in defaults.items():
+        if k not in u:
+            u[k] = v
 
 def load_data():
     with lock:
@@ -205,10 +206,10 @@ def load_data():
                 try: shutil.copy(BACKUP_FILE, DATA_FILE)
                 except: pass
             else:
-                default = create_default_data()
+                d = create_default_data()
                 with open(DATA_FILE, "w", encoding="utf-8") as f:
-                    json.dump(default, f, ensure_ascii=False, indent=2)
-                return default
+                    json.dump(d, f, ensure_ascii=False, indent=2)
+                return d
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -221,37 +222,32 @@ def load_data():
             if os.path.exists(BACKUP_FILE):
                 try:
                     with open(BACKUP_FILE, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    return _ensure_keys(data)
+                        return _ensure_keys(json.load(f))
                 except: pass
-            default = create_default_data()
+            d = create_default_data()
             with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(default, f, ensure_ascii=False, indent=2)
-            return default
+                json.dump(d, f, ensure_ascii=False, indent=2)
+            return d
 
 def save_data(data):
     with lock:
         data = _ensure_keys(data)
-        temp_file = DATA_FILE + ".tmp"
+        tf = DATA_FILE + ".tmp"
         try:
-            with open(temp_file, "w", encoding="utf-8") as f:
+            with open(tf, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            return False
+        except: return False
         if os.path.exists(DATA_FILE):
             try: shutil.copy(DATA_FILE, BACKUP_FILE)
             except: pass
         try:
-            os.replace(temp_file, DATA_FILE)
-            return True
-        except Exception:
-            if os.path.exists(BACKUP_FILE):
-                shutil.copy(BACKUP_FILE, DATA_FILE)
+            os.replace(tf, DATA_FILE); return True
+        except:
+            if os.path.exists(BACKUP_FILE): shutil.copy(BACKUP_FILE, DATA_FILE)
             return False
 
 def get_user(user_id):
-    data = load_data()
-    return data["users"].get(str(user_id))
+    return load_data()["users"].get(str(user_id))
 
 def update_user(user_id, updates):
     data = load_data()
@@ -273,284 +269,250 @@ def find_user_by_name_or_code(query):
     data = load_data()
     q = query.lower()
     for uid, u in data["users"].items():
-        if u.get("name", "").lower() == q:
-            return uid, u
-        if u.get("referral_code", "").lower() == q:
-            return uid, u
+        if u.get("name", "").lower() == q: return uid, u
+        if u.get("referral_code", "").lower() == q: return uid, u
     return None, None
 
-# ==================== چک رسیدن میوه ====================
-def check_harvest(user_id):
+# ==================== انبار ====================
+def get_inv_count(user):
+    return sum(user.get("inventory", {}).values())
+
+def get_inv_capacity(user):
+    return INVENTORY_CAPACITY.get(user.get("level", 1), 1)
+
+def add_to_inventory(user_id, fruit_name):
+    """اضافه کردن میوه به انبار. اگه پر باشه False برمی‌گردونه"""
+    user = get_user(user_id)
+    if not user: return False
+    if get_inv_count(user) >= get_inv_capacity(user):
+        return False
+    inv = user.get("inventory", {})
+    inv[fruit_name] = inv.get(fruit_name, 0) + 1
+    update_user(user_id, {"inventory": inv})
+    return True
+
+def remove_from_inventory(user_id, fruit_name, count=1):
+    user = get_user(user_id)
+    if not user: return False
+    inv = user.get("inventory", {})
+    if inv.get(fruit_name, 0) < count: return False
+    inv[fruit_name] -= count
+    if inv[fruit_name] <= 0: del inv[fruit_name]
+    update_user(user_id, {"inventory": inv})
+    return True
+
+# ==================== زمین‌ها ====================
+def get_plot_remaining(plot):
+    if plot.get("state") != "growing": return None
+    ht = plot.get("harvest_time")
+    if not ht: return None
+    try:
+        rem = (datetime.fromisoformat(ht) - datetime.now()).total_seconds()
+        return max(0, int(rem))
+    except: return None
+
+def check_all_harvests(user_id):
     data = load_data()
     user = data["users"].get(str(user_id))
-    if not user:
-        return False
-    if user.get("state") != "growing":
-        return False
-    harvest_time = user.get("harvest_time")
-    if not harvest_time:
-        return False
-    try:
-        ht = datetime.fromisoformat(harvest_time)
-    except Exception:
-        return False
-    if datetime.now() >= ht:
-        user["state"] = "harvested"
-        user["harvest_time"] = None
+    if not user: return False
+    changed = False
+    for plot in user.get("plots", []):
+        if plot.get("state") == "growing":
+            ht = plot.get("harvest_time")
+            if ht:
+                try:
+                    if datetime.now() >= datetime.fromisoformat(ht):
+                        plot["state"] = "harvested"
+                        plot["harvest_time"] = None
+                        changed = True
+                except: pass
+    if changed:
         data["users"][str(user_id)] = user
         save_data(data)
-        return True
-    return False
-
-def get_remaining_seconds(user):
-    if user.get("state") != "growing":
-        return None
-    ht_str = user.get("harvest_time")
-    if not ht_str:
-        return None
-    try:
-        ht = datetime.fromisoformat(ht_str)
-        remaining = (ht - datetime.now()).total_seconds()
-        if remaining <= 0:
-            return 0
-        return int(remaining)
-    except Exception:
-        return None
+    return changed
 
 # ==================== فصل ====================
 def get_current_season():
     data = load_data()
-    start_str = data.get("game_start_time")
-    if not start_str:
-        data["game_start_time"] = datetime.now().isoformat()
-        save_data(data)
-        return "spring"
-    start = datetime.fromisoformat(start_str)
-    elapsed = (datetime.now() - start).total_seconds() / 60
-    idx = int(elapsed // SEASON_DURATION_MIN) % len(SEASON_CYCLE)
-    return SEASON_CYCLE[idx]
+    s = data.get("game_start_time", datetime.now().isoformat())
+    try:
+        start = datetime.fromisoformat(s)
+        elapsed = (datetime.now() - start).total_seconds() / 60
+        return SEASON_CYCLE[int(elapsed // SEASON_DURATION_MIN) % len(SEASON_CYCLE)]
+    except: return "spring"
 
 def get_season_effects():
     season = get_current_season()
     e = {"growth_mult": 1.0, "sell_mult": 1.0, "buy_mult": 1.0, "golden_chance": 0.02}
-    if season == "spring":
-        e["growth_mult"] = 1 / 1.2
-    elif season == "summer":
-        e["golden_chance"] = 0.02 * 1.75
-    elif season == "autumn":
-        e["sell_mult"] = random.uniform(1.25, 1.5)
-    elif season == "winter":
-        e["buy_mult"] = 1 / 1.2
+    if season == "spring": e["growth_mult"] = 1 / 1.2
+    elif season == "summer": e["golden_chance"] = 0.02 * 1.75
+    elif season == "autumn": e["sell_mult"] = random.uniform(1.25, 1.5)
+    elif season == "winter": e["buy_mult"] = 1 / 1.2
     return e, season
 
 # ==================== پت ====================
-def get_pet_effect(user, effect_type):
+def get_pet_effect(user, t):
     pet = user.get("pet")
-    if not pet:
-        return 0
-    if pet.get("type") == effect_type:
-        return pet.get("value", 0)
-    return 0
+    if not pet: return 0
+    return pet.get("value", 0) if pet.get("type") == t else 0
 
 def spin_egg(egg_type):
-    if egg_type not in PET_EGGS:
-        return None
+    if egg_type not in PET_EGGS: return None
     pets = PET_EGGS[egg_type]["pets"]
-    r = random.randint(1, 100)
-    cumulative = 0
+    r = random.randint(1, 100); c = 0
     for p in pets:
-        cumulative += p["chance"]
-        if r <= cumulative:
-            return p
+        c += p["chance"]
+        if r <= c: return p
     return pets[-1]
 
 # ==================== کلن ====================
 def get_clan(clan_id):
-    data = load_data()
-    return data["clans"].get(clan_id)
+    return load_data()["clans"].get(clan_id)
 
-def create_clan(clan_id, name, leader_id, leader_name):
+def create_clan(clan_id, name, lid, lname):
     data = load_data()
-    if clan_id in data["clans"]:
-        return False
-    data["clans"][clan_id] = {
-        "name": name,
-        "leader_id": leader_id,
-        "leader_name": leader_name,
-        "level": 1,
-        "treasury": 0,
-        "members": [leader_id],
-        "member_names": {leader_id: leader_name},
-        "created_at": datetime.now().isoformat(),
-    }
-    save_data(data)
-    return True
+    if clan_id in data["clans"]: return False
+    data["clans"][clan_id] = {"name": name, "leader_id": lid, "leader_name": lname,
+        "level": 1, "treasury": 0, "members": [lid],
+        "member_names": {lid: lname}, "created_at": datetime.now().isoformat()}
+    save_data(data); return True
 
 def get_clan_bonus(user):
-    if not user.get("clan_id"):
-        return 0
+    if not user.get("clan_id"): return 0
     clan = get_clan(user["clan_id"])
-    if not clan:
-        return 0
-    return clan["level"] * CLAN_BONUS_PER_LEVEL
+    return clan["level"] * CLAN_BONUS_PER_LEVEL if clan else 0
 
-# ==================== لیگ و دوره ====================
-def get_week_number(start_time_str, now=None):
-    start = datetime.fromisoformat(start_time_str)
-    if now is None:
-        now = datetime.now()
-    elapsed = (now - start).total_seconds() / (7 * 24 * 3600)
-    return int(elapsed) + 1
+# ==================== لیگ ====================
+def get_week_number(s, now=None):
+    start = datetime.fromisoformat(s)
+    if now is None: now = datetime.now()
+    return int((now - start).total_seconds() / (7 * 24 * 3600)) + 1
 
 def get_period_number():
     data = load_data()
-    start_str = data.get("game_start_time")
-    if not start_str:
-        return 1
-    return get_week_number(start_str)
+    s = data.get("game_start_time")
+    return get_week_number(s) if s else 1
 
-def process_period_end(period_num, user, user_id_str):
-    if user.get("level", 1) < 7 and user.get("prestige", 0) == 0:
-        return
-    prestige = user.get("prestige", 0)
-    league_key = str(prestige)
+def process_period_end(pn, user, uid_str):
+    if user.get("level", 1) < 7 and user.get("prestige", 0) == 0: return
+    pk = str(user.get("prestige", 0))
     data = load_data()
     leagues = data.get("leagues", {})
-    period_key = f"period_{period_num}"
-    if league_key not in leagues:
-        return
-    if period_key not in leagues[league_key]:
-        return
-    league_data = leagues[league_key][period_key]
-    members = league_data.get("members", {})
-    if user_id_str not in members:
-        return
+    per_key = f"period_{pn}"
+    if pk not in leagues or per_key not in leagues[pk]: return
+    members = leagues[pk][per_key].get("members", {})
+    if uid_str not in members: return
     total = len(members)
-    if total == 0:
-        return
-    sorted_members = sorted(members.items(), key=lambda x: x[1].get("profit", 0), reverse=True)
+    if total == 0: return
+    sm = sorted(members.items(), key=lambda x: x[1].get("profit", 0), reverse=True)
+    rank = next((i+1 for i, (uid, _) in enumerate(sm) if uid == uid_str), 0)
+    if rank == 0: return
     if total < 10:
-        rank = next((i+1 for i, (uid, _) in enumerate(sorted_members) if uid == user_id_str), 0)
-        if rank > 0:
-            ach = {"type": "lone_eagle", "rank": rank, "period": period_num,
-                   "league": prestige, "date": datetime.now().strftime("%Y-%m-%d")}
-            if "achievements" not in user:
-                user["achievements"] = []
-            user["achievements"].append(ach)
+        ach = {"type": "lone_eagle", "rank": rank, "period": pn,
+               "league": user.get("prestige", 0), "date": datetime.now().strftime("%Y-%m-%d")}
+        user.setdefault("achievements", []).append(ach)
     else:
-        rank = next((i+1 for i, (uid, _) in enumerate(sorted_members) if uid == user_id_str), 0)
-        if rank == 0:
-            return
-        percent = max(1, int((rank / total) * 100))
-        if percent <= 10:
-            ach = {"type": "top_percent", "percent": percent, "period": period_num,
-                   "league": prestige, "date": datetime.now().strftime("%Y-%m-%d")}
-            if "achievements" not in user:
-                user["achievements"] = []
-            user["achievements"].append(ach)
+        pct = max(1, int((rank / total) * 100))
+        if pct <= 10:
+            ach = {"type": "top_percent", "percent": pct, "period": pn,
+                   "league": user.get("prestige", 0), "date": datetime.now().strftime("%Y-%m-%d")}
+            user.setdefault("achievements", []).append(ach)
 
 def check_period_reset(user_id):
     data = load_data()
-    current_period = get_period_number()
+    cp = get_period_number()
     user = data["users"].get(str(user_id))
-    if not user:
-        return False
-    last_period = user.get("last_seen_period", current_period)
-    if current_period > last_period:
-        for p in range(last_period, current_period):
+    if not user: return False
+    lp = user.get("last_seen_period", cp)
+    if cp > lp:
+        for p in range(lp, cp):
             process_period_end(p, user, str(user_id))
         user["period_start_coins"] = user["coins"]
         user["period_start_time"] = datetime.now().isoformat()
-        user["current_period"] = current_period
-        user["last_seen_period"] = current_period
+        user["current_period"] = cp
+        user["last_seen_period"] = cp
         data["users"][str(user_id)] = user
-        save_data(data)
-        return True
+        save_data(data); return True
     return False
 
 def update_league_profit(user_id, user, profit):
-    if user.get("level", 1) < 7 and user.get("prestige", 0) == 0:
-        return
-    prestige = user.get("prestige", 0)
-    league_key = str(prestige)
-    period_num = user.get("current_period", 1)
-    period_key = f"period_{period_num}"
+    if user.get("level", 1) < 7 and user.get("prestige", 0) == 0: return
+    pk = str(user.get("prestige", 0))
+    pn = user.get("current_period", 1)
+    per_key = f"period_{pn}"
     data = load_data()
-    if "leagues" not in data:
-        data["leagues"] = {}
-    if league_key not in data["leagues"]:
-        data["leagues"][league_key] = {}
-    if period_key not in data["leagues"][league_key]:
-        data["leagues"][league_key][period_key] = {
-            "started_at": user.get("period_start_time"),
-            "members": {}
-        }
-    data["leagues"][league_key][period_key]["members"][str(user_id)] = {
-        "name": user.get("name", "?"),
-        "profit": profit,
-    }
+    data.setdefault("leagues", {}).setdefault(pk, {}).setdefault(per_key, {"started_at": user.get("period_start_time"), "members": {}})
+    data["leagues"][pk][per_key]["members"][str(user_id)] = {
+        "name": user.get("name", "?"), "profit": profit}
     save_data(data)
 
 # ==================== توابع کمکی ====================
 def get_available_fruits(user):
-    if user.get("prestige", 0) > 0:
-        return ALL_FRUITS
+    if user.get("prestige", 0) > 0: return ALL_FRUITS
     return LEVEL_UNLOCKS.get(user["level"], LEVEL_UNLOCKS[7])["fruits"]
 
 def get_available_features(user):
-    if user.get("prestige", 0) > 0:
-        return ALL_FEATURES
+    if user.get("prestige", 0) > 0: return ALL_FEATURES
     return LEVEL_UNLOCKS.get(user["level"], LEVEL_UNLOCKS[7])["features"]
 
-def has_feature(user, feature):
-    return feature in get_available_features(user)
+def has_feature(user, f): return f in get_available_features(user)
+def xp_needed_for(l): return XP_REQUIRED.get(l, 999999)
+def xp_from_sale(f): return random.randint(*XP_FROM_SALES[f]) if f in XP_FROM_SALES else 0
 
-def xp_needed_for(level):
-    return XP_REQUIRED.get(level, 999999)
+def get_land_price(current_plots):
+    """قیمت زمین بعدی. اگه به حداکثر رسیده None برمی‌گردونه"""
+    if current_plots >= MAX_PLOTS: return None
+    return LAND_PRICES[current_plots - 1]
 
-def xp_from_sale(fruit_name):
-    return random.randint(*XP_FROM_SALES[fruit_name]) if fruit_name in XP_FROM_SALES else 0
-
-# ==================== کیبورد ====================
+# ==================== کیبورد اصلی ====================
 def get_keyboard(user_id):
     user = get_user(user_id)
-    if not user:
-        return InlineKeyboardBuilder().as_markup()
+    if not user: return InlineKeyboardBuilder().as_markup()
     
-    cf = user["current_fruit"]
-    if cf not in get_available_fruits(user):
-        cf = get_available_fruits(user)[0]
-        update_user(user_id, {"current_fruit": cf})
-    
-    fruit = FRUITS[cf]
     kb = InlineKeyboardBuilder()
+    plots = user.get("plots", [])
+    max_plots = user.get("max_plots", 1)
     
-    if user["state"] == "growing":
-        rem = get_remaining_seconds(user)
-        if rem is not None and rem > 0:
-            mins = rem // 60
-            secs = rem % 60
-            kb.button(f"⏳ در حال رشد ({mins}:{secs:02d})", callback_data="noop")
+    # ✅ اگه ۱ زمین: مثل قبل
+    if max_plots == 1:
+        plot = plots[0]
+        cf = plot.get("fruit", 0)
+        if cf not in get_available_fruits(user):
+            cf = get_available_fruits(user)[0]
+        fruit = FRUITS[cf]
+        
+        if plot["state"] == "growing":
+            rem = get_plot_remaining(plot)
+            if rem is not None and rem > 0:
+                kb.button(f"⏳ در حال رشد ({rem//60}:{rem%60:02d})", callback_data="noop")
+            else:
+                kb.button("⏳ در حال رشد...", callback_data="noop")
+            kb.button("⏳ هنوز نرسیده!", callback_data="noop")
+        elif plot["state"] == "harvested":
+            kb.button(f"📦 برداشت {fruit}", callback_data="harvest_0")
+            kb.button(f"💰 فروش فوری {fruit}", callback_data="sell_immediate_0")
         else:
-            kb.button("⏳ در حال رشد...", callback_data="noop")
-        kb.button("⏳ هنوز نرسیده!", callback_data="noop")
-    elif user["state"] == "harvested":
-        kb.button("🌱 بذر قبلاً کاشته شده", callback_data="noop")
-        kb.button(f"💰 فروش {fruit}", callback_data="sell")
+            kb.button(f"🌱 خرید بذر {fruit}", callback_data="buy_0")
+        
+        kb.adjust(2)
     else:
-        kb.button(f"🌱 خرید بذر {fruit}", callback_data="buy")
-        kb.button(f"💰 فروش {fruit}", callback_data="sell")
+        # ✅ چند زمین: دکمه‌ی زمین‌ها
+        kb.button("🏞️ زمین‌ها", callback_data="lands_menu")
+        kb.button("📦 انبار", callback_data="inventory_menu")
+        kb.adjust(2)
     
-    kb.adjust(2)
-    
+    # انتخاب میوه
     available = get_available_fruits(user)
     if len(available) > 1:
         for i in available:
-            mark = "✅ " if i == cf else ""
+            mark = "✅ " if i == user.get("current_fruit", 0) else ""
             kb.button(f"{mark}{FRUITS[i]}", callback_data=f"switch_{i}")
         kb.adjust(3)
     
+    # دکمه‌های عمومی
     kb.button("📊 وضعیت", callback_data="status")
+    if max_plots == 1:
+        kb.button("📦 انبار", callback_data="inventory_menu")
     
     if has_feature(user, "pet"):
         kb.button("🐾 پت", callback_data="pet_menu")
@@ -580,484 +542,501 @@ def get_keyboard(user_id):
 # ==================== متن وضعیت ====================
 def build_status_text(user, user_id):
     effects, season = get_season_effects()
-    multiplier = user["prestige_multiplier"]
-    features = get_available_features(user)
-    
+    mult = user["prestige_multiplier"]
+    feats = get_available_features(user)
     profit = user["coins"] - user.get("period_start_coins", 1)
-    period_num = user.get("current_period", 1)
+    pn = user.get("current_period", 1)
+    inv_count = get_inv_count(user)
+    inv_cap = get_inv_capacity(user)
     
-    text = (
-        f"📊 **وضعیت {user['name']}:**\n"
-        f"💰 سکه: {user['coins']:,}\n"
-        f"📈 لول: {user['level']} | XP: {user['xp']}/{xp_needed_for(user['level'])}\n"
-        f"🌤 فصل: {SEASON_FA[season]}\n"
-    )
+    text = (f"📊 **وضعیت {user['name']}:**\n"
+            f"💰 سکه: {user['coins']:,}\n"
+            f"📈 لول: {user['level']} | XP: {user['xp']}/{xp_needed_for(user['level'])}\n"
+            f"🌤 فصل: {SEASON_FA[season]}\n")
     
-    if "prestige" in features:
-        text += f"⭐ پرستیژ: {user['prestige']} | ضریب: {multiplier:.2f}x\n"
-    
-    if "league" in features:
-        text += f"💵 سود دوره {period_num}: {profit:,}\n"
-    
-    if "pet" in features:
+    if "prestige" in feats:
+        text += f"⭐ پرستیژ: {user['prestige']} | ضریب: {mult:.2f}x\n"
+    if "league" in feats:
+        text += f"💵 سود دوره {pn}: {profit:,}\n"
+    if "pet" in feats:
         pet = user.get("pet")
         if pet:
-            type_fa = {"sell": "سود", "speed": "سرعت", "xp": "XP"}
-            pet_text = f"{pet['emoji']} {pet['name']} (+{pet['value']}٪ {type_fa.get(pet['type'], '')})"
-        else:
-            pet_text = "ندارد"
+            tfa = {"sell": "سود", "speed": "سرعت", "xp": "XP"}
+            pet_text = f"{pet['emoji']} {pet['name']} (+{pet['value']}٪ {tfa.get(pet['type'], '')})"
+        else: pet_text = "ندارد"
         text += f"🐾 پت: {pet_text}\n"
     
-    if "worker" in features:
-        text += f"👷 کارگر: لول {user['worker']['level']} ({'فعال' if user['worker']['active'] else 'غیرفعال'})\n"
+    text += f"📦 انبار: {inv_count}/{inv_cap}\n"
+    text += f"🏞️ زمین‌ها: {user.get('max_plots', 1)}\n"
     
-    if "clan" in features:
+    if "worker" in feats:
+        w = user["worker"]
+        text += f"👷 کارگر: لول {w['level']} ({'فعال' if w['active'] else 'غیرفعال'})\n"
+    if "clan" in feats:
         if user.get("clan_id"):
             clan = get_clan(user["clan_id"])
-            if clan:
-                text += f"🏰 کلن: {clan['name']} (لول {clan['level']})\n"
+            if clan: text += f"🏰 کلن: {clan['name']} (لول {clan['level']})\n"
         else:
             text += f"🏰 کلن: بدون کلن\n"
-    
-    if "gift" in features:
-        text += f"🎁 هدیه: داده {user.get('gifts_given',0)} | گرفته {user.get('gifts_received',0)}\n"
-    
-    if "league" in features:
+    if "gift" in feats:
+        text += f"🎁 هدیه: {user.get('gifts_given',0)} | {user.get('gifts_received',0)}\n"
+    if "league" in feats:
         rank = get_user_league_rank(user_id, user)
         text += f"🏅 رتبه لیگ: {rank}\n"
         text += f"🎖️ افتخارات: {len(user.get('achievements', []))}\n"
     
-    if user["state"] == "growing":
-        rem = get_remaining_seconds(user)
-        if rem is not None and rem > 0:
-            mins = rem // 60
-            secs = rem % 60
-            text += f"⏳ زمان رسیدن: {mins}:{secs:02d}\n"
-        else:
-            text += f"⏳ زمان رسیدن: به‌زودی\n"
-    elif user["state"] == "harvested":
-        text += f"✅ آماده فروش\n"
+    # نمایش زمین‌ها
+    plots = user.get("plots", [])
+    if len(plots) > 1:
+        text += f"\n🏞️ **زمین‌ها:**\n"
+        for i, p in enumerate(plots):
+            fruit = FRUITS[p.get("fruit", 0)]
+            if p["state"] == "growing":
+                rem = get_plot_remaining(p)
+                if rem is not None:
+                    text += f"• زمین {i+1}: 🍅 {fruit} ({rem//60}:{rem%60:02d})\n"
+                else:
+                    text += f"• زمین {i+1}: 🍅 {fruit} (در حال رشد)\n"
+            elif p["state"] == "harvested":
+                text += f"• زمین {i+1}: 📦 {fruit} (برداشت)\n"
+            else:
+                text += f"• زمین {i+1}: خالی\n"
     
-    text += (
-        f"🌱 میوه فعلی: {FRUITS[user['current_fruit']]}\n\n"
-        f"🍎 **قیمت میوه‌های قابل‌دسترس:**\n"
-    )
-    
+    text += f"\n🌱 میوه انتخابی: {FRUITS[user['current_fruit']]}\n\n🍎 **قیمت‌ها:**\n"
     for i in get_available_fruits(user):
-        bp = int(PRICES[i][0] * multiplier * effects["buy_mult"])
-        sp = int(PRICES[i][1] * multiplier * effects["sell_mult"])
+        bp = int(PRICES[i][0] * mult * effects["buy_mult"])
+        sp = int(PRICES[i][1] * mult * effects["sell_mult"])
         mark = "✅ " if i == user["current_fruit"] else ""
         text += f"{mark}{FRUITS[i]}: خرید {bp:,} | فروش {sp:,}\n"
-    
     return text
 
 def get_user_league_rank(user_id, user):
-    prestige = user.get("prestige", 0)
-    league_key = str(prestige)
-    period_num = user.get("current_period", 1)
-    period_key = f"period_{period_num}"
+    pk = str(user.get("prestige", 0))
+    pn = user.get("current_period", 1)
+    per_key = f"period_{pn}"
     data = load_data()
     leagues = data.get("leagues", {})
-    if league_key not in leagues or period_key not in leagues[league_key]:
-        return "—"
-    members = leagues[league_key][period_key].get("members", {})
-    if str(user_id) not in members:
-        return "—"
-    sorted_members = sorted(members.items(), key=lambda x: x[1].get("profit", 0), reverse=True)
-    for i, (uid, _) in enumerate(sorted_members, 1):
-        if uid == str(user_id):
-            return f"#{i} از {len(members)}"
+    if pk not in leagues or per_key not in leagues[pk]: return "—"
+    members = leagues[pk][per_key].get("members", {})
+    if str(user_id) not in members: return "—"
+    sm = sorted(members.items(), key=lambda x: x[1].get("profit", 0), reverse=True)
+    for i, (uid, _) in enumerate(sm, 1):
+        if uid == str(user_id): return f"#{i} از {len(members)}"
     return "—"
 
 # ==================== راه‌اندازی ====================
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
 
-# ==================== هندلرها ====================
+# ==================== هندلرهای پیام ====================
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    check_harvest(user_id)
-    check_period_reset(user_id)
-    
+    check_all_harvests(user_id); check_period_reset(user_id)
     user = get_user(user_id)
     if not user or user.get("name", "") == "":
         await state.set_state(UserForm.name)
-        await message.answer("👤 لطفاً یک نام برای خود انتخاب کن (حداقل ۳ کاراکتر، بدون فاصله، تکراری نباشد):")
+        await message.answer("👤 لطفاً یک نام انتخاب کن (حداقل ۳ کاراکتر، بدون فاصله، تکراری نباشد):")
         return
     await show_main_menu(message)
 
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
-    user_id = message.from_user.id
-    check_harvest(user_id)
-    check_period_reset(user_id)
-    user = get_user(user_id)
+    uid = message.from_user.id
+    check_all_harvests(uid); check_period_reset(uid)
+    user = get_user(uid)
     if not user: return
-    await message.answer(build_status_text(user, user_id), reply_markup=get_keyboard(user_id))
+    await message.answer(build_status_text(user, uid), reply_markup=get_keyboard(uid))
 
 @dp.message(Command("gift"))
 async def cmd_gift(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    check_harvest(user_id)
-    user = get_user(user_id)
+    uid = message.from_user.id
+    check_all_harvests(uid)
+    user = get_user(uid)
     if not user or not has_feature(user, "gift"):
-        await message.answer("🔒 این ویژگی در لول ۶ باز می‌شود.")
-        return
+        await message.answer("🔒 لول ۶ باز می‌شود."); return
     await state.set_state(UserForm.gift_target)
-    await message.answer("🎁 نام یا کد معرف کاربر مقصد را وارد کن:")
+    await message.answer("🎁 نام یا کد کاربر مقصد:")
 
 @dp.message(UserForm.name)
 async def process_name(message: Message, state: FSMContext):
-    user_id = message.from_user.id
+    uid = message.from_user.id
     name = message.text.strip()
     if len(name) < 3 or " " in name:
-        await message.answer("❌ نام باید حداقل ۳ حرف و بدون فاصله باشد. دوباره تلاش کن:")
+        await message.answer("❌ نام باید حداقل ۳ حرف و بدون فاصله باشد:")
         return
     data = load_data()
-    for uid, u in data["users"].items():
+    for uid2, u in data["users"].items():
         if u.get("name", "").lower() == name.lower():
-            await message.answer("❌ این نام قبلاً ثبت شده. نام دیگری انتخاب کن:")
+            await message.answer("❌ این نام قبلاً ثبت شده:")
             return
-    update_user(user_id, {"name": name})
+    update_user(uid, {"name": name})
     await state.clear()
-    await message.answer(f"✅ نام '{name}' ثبت شد! خوش آمدی.")
+    await message.answer(f"✅ نام '{name}' ثبت شد!")
     await show_main_menu(message)
 
 @dp.message(UserForm.gift_target)
 async def process_gift_target(message: Message, state: FSMContext):
     await state.update_data(gift_target=message.text.strip())
     await state.set_state(UserForm.gift_amount)
-    await message.answer("💰 مقدار سکه‌ای که می‌خواهی هدیه دهی را وارد کن:")
+    await message.answer("💰 مقدار سکه:")
 
 @dp.message(UserForm.gift_amount)
 async def process_gift_amount(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    user = get_user(user_id)
+    uid = message.from_user.id
+    user = get_user(uid)
     if not user: return
     try:
         amount = int(message.text.strip())
         if amount <= 0: raise ValueError
     except:
-        await message.answer("❌ لطفاً یک عدد مثبت وارد کن.")
-        return
-    data_fsm = await state.get_data()
-    target_q = data_fsm.get("gift_target")
+        await message.answer("❌ عدد مثبت وارد کن."); return
+    d = await state.get_data()
+    tq = d.get("gift_target")
     await state.clear()
     if user["coins"] < amount:
-        await message.answer(f"❌ سکه کافی نیست. موجودی: {user['coins']:,}")
-        return
-    tid, target = find_user_by_name_or_code(target_q)
-    if not tid or tid == str(user_id):
-        await message.answer("❌ کاربر پیدا نشد یا نمی‌توانی به خودت هدیه دهی.")
-        return
-    update_user(user_id, {"coins": user["coins"] - amount,
-                           "gifts_given": user.get("gifts_given", 0) + 1})
-    update_user(int(tid), {"coins": target["coins"] + amount,
-                            "gifts_received": target.get("gifts_received", 0) + 1})
-    update_leaderboard(user_id, user["name"], user["coins"] - amount, user["level"], user["prestige"])
+        await message.answer(f"❌ موجودی: {user['coins']:,}"); return
+    tid, target = find_user_by_name_or_code(tq)
+    if not tid or tid == str(uid):
+        await message.answer("❌ کاربر پیدا نشد."); return
+    update_user(uid, {"coins": user["coins"] - amount, "gifts_given": user.get("gifts_given", 0) + 1})
+    update_user(int(tid), {"coins": target["coins"] + amount, "gifts_received": target.get("gifts_received", 0) + 1})
+    update_leaderboard(uid, user["name"], user["coins"] - amount, user["level"], user["prestige"])
     update_leaderboard(int(tid), target["name"], target["coins"] + amount, target["level"], target["prestige"])
     await message.answer(f"✅ {amount:,} سکه به {target['name']} هدیه دادی!")
 
-# ---------- کلن ----------
 @dp.message(UserForm.clan_name)
 async def process_clan_name(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    user = get_user(user_id)
+    uid = message.from_user.id
+    user = get_user(uid)
     if not user: return
     name = message.text.strip()
     if len(name) < 3 or len(name) > 20 or " " in name:
-        await message.answer("❌ نام کلن باید ۳ تا ۲۰ کاراکتر و بدون فاصله باشد:")
-        return
+        await message.answer("❌ نام کلن ۳-۲۰ کاراکتر و بدون فاصله:"); return
     data = load_data()
     for cid, c in data.get("clans", {}).items():
         if c.get("name", "").lower() == name.lower():
-            await message.answer("❌ این نام کلن قبلاً ثبت شده:")
-            return
+            await message.answer("❌ تکراریه:"); return
     if user["coins"] < CLAN_CREATE_COST:
-        await message.answer(f"❌ نیاز به {CLAN_CREATE_COST:,} سکه برای ساخت کلن.")
-        await state.clear()
-        return
-    clan_id = f"clan_{user_id}"
-    create_clan(clan_id, name, str(user_id), user["name"])
-    update_user(user_id, {"clan_id": clan_id, "coins": user["coins"] - CLAN_CREATE_COST})
+        await message.answer(f"❌ نیاز به {CLAN_CREATE_COST:,}"); await state.clear(); return
+    cid = f"clan_{uid}"
+    create_clan(cid, name, str(uid), user["name"])
+    update_user(uid, {"clan_id": cid, "coins": user["coins"] - CLAN_CREATE_COST})
     await state.clear()
-    await message.answer(f"🏰 کلن «{name}» ساخته شد!", reply_markup=get_keyboard(user_id))
+    await message.answer(f"🏰 کلن «{name}» ساخته شد!", reply_markup=get_keyboard(uid))
 
 @dp.message(UserForm.clan_invite)
 async def process_clan_invite(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user or not user.get("clan_id"): 
-        await state.clear(); return
-    target_q = message.text.strip()
-    tid, target = find_user_by_name_or_code(target_q)
-    if not tid:
-        await message.answer("❌ کاربر پیدا نشد.")
-        return
-    if target.get("clan_id"):
-        await message.answer("❌ این کاربر در کلن دیگری است.")
-        return
+    uid = message.from_user.id
+    user = get_user(uid)
+    if not user or not user.get("clan_id"): await state.clear(); return
+    tid, target = find_user_by_name_or_code(message.text.strip())
+    if not tid: await message.answer("❌ پیدا نشد."); return
+    if target.get("clan_id"): await message.answer("❌ در کلن دیگه‌ایه."); return
     data = load_data()
     clan = data["clans"].get(user["clan_id"])
-    if not clan:
-        await state.clear(); return
+    if not clan: await state.clear(); return
     if len(clan["members"]) >= CLAN_MAX_MEMBERS.get(clan["level"], 10):
-        await message.answer("❌ کلن پر است!")
-        return
+        await message.answer("❌ کلن پر است!"); return
     clan["members"].append(str(tid))
     clan["member_names"][str(tid)] = target["name"]
-    save_data(data)
-    update_user(int(tid), {"clan_id": user["clan_id"]})
+    save_data(data); update_user(int(tid), {"clan_id": user["clan_id"]})
     await state.clear()
-    await message.answer(f"✅ {target['name']} به کلن اضافه شد.")
+    await message.answer(f"✅ {target['name']} اضافه شد.")
 
 @dp.message(UserForm.clan_donate)
 async def process_clan_donate(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user or not user.get("clan_id"):
-        await state.clear(); return
+    uid = message.from_user.id
+    user = get_user(uid)
+    if not user or not user.get("clan_id"): await state.clear(); return
     try:
         amount = int(message.text.strip())
         if amount < 10000: raise ValueError
-    except:
-        await message.answer("❌ حداقل ۱۰,۰۰۰ سکه.")
-        return
-    if user["coins"] < amount:
-        await message.answer("❌ سکه کافی نیست.")
-        return
+    except: await message.answer("❌ حداقل ۱۰,۰۰۰"); return
+    if user["coins"] < amount: await message.answer("❌ کافی نیست."); return
     data = load_data()
     clan = data["clans"].get(user["clan_id"])
-    if not clan: 
-        await state.clear(); return
-    clan["treasury"] += amount
-    save_data(data)
-    update_user(user_id, {"coins": user["coins"] - amount})
+    if not clan: await state.clear(); return
+    clan["treasury"] += amount; save_data(data)
+    update_user(uid, {"coins": user["coins"] - amount})
     await state.clear()
-    await message.answer(f"✅ {amount:,} سکه به خزانه اهدا شد.")
+    await message.answer(f"✅ {amount:,} سکه اهدا شد.")
 
 @dp.message(UserForm.clan_chat)
 async def process_clan_chat(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user or not user.get("clan_id"):
-        await state.clear(); return
+    uid = message.from_user.id
+    user = get_user(uid)
+    if not user or not user.get("clan_id"): await state.clear(); return
     clan = get_clan(user["clan_id"])
-    if not clan: 
-        await state.clear(); return
-    msg = f"🏰 **پیام کلن از {user['name']}:**\n\n{message.text}"
+    if not clan: await state.clear(); return
+    msg = f"🏰 **کلن - {user['name']}:**\n\n{message.text}"
     for m in clan["members"]:
-        try:
-            await bot.send_message(int(m), msg)
-        except Exception:
-            pass
+        try: await bot.send_message(int(m), msg)
+        except: pass
     await state.clear()
 
 async def show_main_menu(message: Message):
-    user_id = message.from_user.id
-    user = get_user(user_id)
+    uid = message.from_user.id
+    user = get_user(uid)
     if not user: return
     _, season = get_season_effects()
     p = f"⭐ پرستیژ {user['prestige']}" if user['prestige'] > 0 else "بدون پرستیژ"
-    text = (
-        f"🌾 **مزرعه‌ی {user['name']}**\n\n"
-        f"🌤 فصل: {SEASON_FA[season]}\n"
-        f"💰 سکه: {user['coins']:,}\n"
-        f"📈 لول: {user['level']} | XP: {user['xp']}/{xp_needed_for(user['level'])}\n"
-        f"⭐ {p}\n"
-        f"🍓 میوه: {FRUITS[user['current_fruit']]}\n"
-    )
-    await message.answer(text, reply_markup=get_keyboard(user_id))
+    plots = user.get("plots", [])
+    plots_text = ""
+    for i, pl in enumerate(plots):
+        fr = FRUITS[pl.get("fruit", 0)]
+        if pl["state"] == "growing":
+            rem = get_plot_remaining(pl)
+            t = f"{rem//60}:{rem%60:02d}" if rem else "..."
+            plots_text += f"🏞 {i+1}: {fr} ({t})\n"
+        elif pl["state"] == "harvested":
+            plots_text += f"🏞 {i+1}: 📦 {fr}\n"
+        else:
+            plots_text += f"🏞 {i+1}: خالی\n"
+    
+    text = (f"🌾 **مزرعه‌ی {user['name']}**\n\n"
+            f"🌤 فصل: {SEASON_FA[season]}\n"
+            f"💰 سکه: {user['coins']:,}\n"
+            f"📈 لول: {user['level']} | XP: {user['xp']}/{xp_needed_for(user['level'])}\n"
+            f"⭐ {p}\n"
+            f"📦 انبار: {get_inv_count(user)}/{get_inv_capacity(user)}\n\n"
+            f"{plots_text}")
+    await message.answer(text, reply_markup=get_keyboard(uid))
 
-# ==================== ✅ پرداخت ====================
+# ==================== پرداخت ====================
 @dp.pre_checkout_query()
 async def on_pre_checkout(query: PreCheckoutQuery):
-    """تأیید اولیه‌ی پرداخت"""
-    try:
-        await query.answer(ok=True)
-    except Exception as e:
-        print(f"خطا در pre_checkout: {e}")
+    try: await query.answer(ok=True)
+    except: pass
 
 @dp.message(F.successful_payment)
 async def on_successful_payment(message: Message):
-    """پرداخت موفق - اضافه کردن سکه به کاربر"""
     sp = message.successful_payment
-    user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user:
-        return
-    
-    payload = sp.invoice_payload  # مثلاً "shop_50000_1140000" یا "shop_70000_phoenix"
-    parts = payload.split("_")
-    
-    try:
-        amount = int(parts[1])
-    except:
-        return
-    
+    uid = message.from_user.id
+    user = get_user(uid)
+    if not user: return
+    parts = sp.invoice_payload.split("_")
+    try: amount = int(parts[1])
+    except: return
+    inv = user.get("inventory", {})
     gift_msg = ""
-    inv = user.get("inventory", [])
     
     if len(parts) >= 4 and parts[3] == "phoenix":
-        # بسته‌ی ققنوس
         coins = int(parts[2])
         new_coins = user["coins"] + coins
-        update_user(user_id, {
-            "coins": new_coins,
-            "pet": PHOENIX_PET,
-            "phoenix_owned": True,
-            "pending_purchase": None
-        })
-        update_leaderboard(user_id, user["name"], new_coins, user["level"], user["prestige"])
-        gift_msg = f"\n🦅 **پت ققنوس** به شما داده شد! (+۱۰۰٪ سود)"
+        update_user(uid, {"coins": new_coins, "pet": PHOENIX_PET,
+                           "phoenix_owned": True, "pending_purchase": None})
+        update_leaderboard(uid, user["name"], new_coins, user["level"], user["prestige"])
         await message.answer(
-            f"✅ **پرداخت موفق!**\n\n"
-            f"💰 مبلغ: {amount:,} تومان\n"
-            f"🪙 سکه دریافتی: {coins:,}\n"
-            f"💼 موجودی جدید: {new_coins:,}{gift_msg}\n\n"
-            f"⚠️ از این پس نمی‌توانید اسپین کنید (ققنوس دائمی است).",
-            reply_markup=get_keyboard(user_id)
-        )
+            f"✅ پرداخت موفق!\n💰 {amount:,} تومان\n🪙 +{coins:,} سکه\n"
+            f"🦅 ققنوس داده شد! (+۱۰۰٪ سود)\n⚠️ از این پس نمی‌توانید اسپین کنید.",
+            reply_markup=get_keyboard(uid))
         return
     
-    # بسته‌های عادی
-    try:
-        coins = int(parts[2])
-    except:
-        return
-    
+    try: coins = int(parts[2])
+    except: return
     new_coins = user["coins"] + coins
     
     if amount == 50000:
         avail = get_available_fruits(user)
         fi = random.choice(avail)
-        inv.append(FRUITS[fi])
-        gift_msg = f"\n🎁 بذر {FRUITS[fi]} به انبار اضافه شد."
+        inv[FRUITS[fi]] = inv.get(FRUITS[fi], 0) + 1
+        gift_msg = f"\n🎁 بذر {FRUITS[fi]}"
     elif amount == 100000:
         fi = random.randint(0, len(FRUITS)-1)
-        inv.append(f"طلایی_{FRUITS[fi]}")
-        gift_msg = f"\n✨ بذر طلایی {FRUITS[fi]} به انبار اضافه شد."
+        inv[f"طلایی_{FRUITS[fi]}"] = inv.get(f"طلایی_{FRUITS[fi]}", 0) + 1
+        gift_msg = f"\n✨ بذر طلایی {FRUITS[fi]}"
     
-    update_user(user_id, {
-        "coins": new_coins,
-        "inventory": inv,
-        "pending_purchase": None
-    })
-    update_leaderboard(user_id, user["name"], new_coins, user["level"], user["prestige"])
-    
-    await message.answer(
-        f"✅ **پرداخت موفق!**\n\n"
-        f"💰 مبلغ: {amount:,} تومان\n"
-        f"🪙 سکه دریافتی: {coins:,}\n"
-        f"💼 موجودی جدید: {new_coins:,}{gift_msg}",
-        reply_markup=get_keyboard(user_id)
-    )
+    update_user(uid, {"coins": new_coins, "inventory": inv, "pending_purchase": None})
+    update_leaderboard(uid, user["name"], new_coins, user["level"], user["prestige"])
+    await message.answer(f"✅ پرداخت موفق!\n💰 {amount:,} تومان\n🪙 +{coins:,} سکه\n💼 موجودی: {new_coins:,}{gift_msg}",
+                          reply_markup=get_keyboard(uid))
 
 # ==================== کال‌بک‌ها ====================
 @dp.callback_query()
 async def on_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    user_id = callback.from_user.id
-    
-    check_harvest(user_id)
-    check_period_reset(user_id)
-    
+    uid = callback.from_user.id
+    check_all_harvests(uid); check_period_reset(uid)
     data = callback.data
-    user = get_user(user_id)
+    user = get_user(uid)
     if not user: return
     
-    if data == "noop":
-        return
-    elif data == "status":
-        await edit_status(callback, user, user_id)
-    elif data == "buy":
-        await buy_seed(callback, user, user_id)
-    elif data == "sell":
-        await sell_fruit(callback, user, user_id)
+    if data == "noop": return
+    elif data == "status": await edit_status(callback, user, uid)
+    elif data == "lands_menu": await show_lands_menu(callback, user, uid)
+    elif data == "inventory_menu": await show_inventory(callback, user, uid)
+    elif data.startswith("buy_"):
+        plot_idx = int(data.split("_")[1])
+        await buy_seed_for_plot(callback, user, uid, plot_idx)
+    elif data.startswith("harvest_"):
+        plot_idx = int(data.split("_")[1])
+        await harvest_plot(callback, user, uid, plot_idx)
+    elif data.startswith("sell_immediate_"):
+        plot_idx = int(data.split("_")[1])
+        await sell_immediate(callback, user, uid, plot_idx)
+    elif data.startswith("sell_inv_"):
+        fruit = data.replace("sell_inv_", "")
+        await sell_from_inventory(callback, user, uid, fruit)
+    elif data.startswith("plant_plot_"):
+        # plant_plot_<plot_idx>_<fruit_idx>
+        parts = data.split("_")
+        plot_idx = int(parts[2]); fruit_idx = int(parts[3])
+        await plant_in_plot(callback, user, uid, plot_idx, fruit_idx)
     elif data.startswith("switch_"):
-        await switch_fruit(callback, user, user_id, int(data.split("_")[1]))
-    elif data == "leaderboard":
-        await show_leaderboard(callback, user, user_id)
-    elif data == "upgrades":
-        await show_upgrades(callback, user, user_id)
-    elif data.startswith("upgrade_"):
-        await buy_upgrade(callback, user, user_id, data.replace("upgrade_", ""))
-    elif data == "daily_orders":
-        await show_daily_orders(callback, user, user_id)
-    elif data == "complete_orders":
-        await complete_orders(callback, user, user_id)
-    elif data == "shop":
-        await show_shop(callback, user, user_id)
-    elif data.startswith("shop_"):
-        await buy_shop(callback, user, user_id, int(data.split("_")[1]))
-    elif data == "worker_menu":
-        await show_worker(callback, user, user_id)
-    elif data == "worker_toggle":
-        await toggle_worker(callback, user, user_id)
-    elif data == "worker_upgrade":
-        await upgrade_worker(callback, user, user_id)
-    elif data == "gift":
-        await start_gift(callback, user, user_id, state)
-    elif data == "prestige_menu":
-        await show_prestige(callback, user, user_id)
-    elif data == "buy_prestige":
-        await buy_prestige(callback, user, user_id)
-    elif data == "pet_menu":
-        await show_pet_menu(callback, user, user_id)
-    elif data.startswith("spin_"):
-        await do_spin(callback, user, user_id, data.replace("spin_", ""))
-    elif data == "clan_menu":
-        await show_clan_menu(callback, user, user_id)
-    elif data == "clan_create":
-        await start_clan_create(callback, user, user_id, state)
-    elif data == "clan_info":
-        await show_clan_info(callback, user, user_id)
+        await switch_fruit(callback, user, uid, int(data.split("_")[1]))
+    elif data == "leaderboard": await show_leaderboard(callback, user, uid)
+    elif data == "upgrades": await show_upgrades(callback, user, uid)
+    elif data.startswith("upgrade_"): await buy_upgrade(callback, user, uid, data.replace("upgrade_", ""))
+    elif data == "buy_land": await buy_land(callback, user, uid)
+    elif data == "daily_orders": await show_daily_orders(callback, user, uid)
+    elif data == "complete_orders": await complete_orders(callback, user, uid)
+    elif data == "shop": await show_shop(callback, user, uid)
+    elif data.startswith("shop_"): await buy_shop(callback, user, uid, int(data.split("_")[1]))
+    elif data == "worker_menu": await show_worker(callback, user, uid)
+    elif data == "worker_toggle": await toggle_worker(callback, user, uid)
+    elif data == "worker_upgrade": await upgrade_worker(callback, user, uid)
+    elif data == "gift": await start_gift(callback, user, uid, state)
+    elif data == "prestige_menu": await show_prestige(callback, user, uid)
+    elif data == "buy_prestige": await buy_prestige(callback, user, uid)
+    elif data == "pet_menu": await show_pet_menu(callback, user, uid)
+    elif data.startswith("spin_"): await do_spin(callback, user, uid, data.replace("spin_", ""))
+    elif data == "clan_menu": await show_clan_menu(callback, user, uid)
+    elif data == "clan_create": await start_clan_create(callback, user, uid, state)
+    elif data == "clan_info": await show_clan_info(callback, user, uid)
     elif data == "clan_invite":
         await state.set_state(UserForm.clan_invite)
-        await callback.message.edit_text("👤 نام یا کد کاربر را وارد کن:", reply_markup=get_keyboard(user_id))
+        await callback.message.edit_text("👤 نام یا کد کاربر:", reply_markup=get_keyboard(uid))
     elif data == "clan_donate":
         await state.set_state(UserForm.clan_donate)
-        await callback.message.edit_text("💰 مقدار سکه برای اهدا (حداقل ۱۰,۰۰۰):", reply_markup=get_keyboard(user_id))
+        await callback.message.edit_text("💰 مقدار سکه (حداقل ۱۰,۰۰۰):", reply_markup=get_keyboard(uid))
     elif data == "clan_chat":
         await state.set_state(UserForm.clan_chat)
-        await callback.message.edit_text("✉️ پیام خود را برای همه اعضا بنویس:", reply_markup=get_keyboard(user_id))
-    elif data == "clan_upgrade":
-        await upgrade_clan(callback, user, user_id)
-    elif data == "clan_leave":
-        await leave_clan(callback, user, user_id)
-    elif data == "clan_disband":
-        await disband_clan(callback, user, user_id)
-    elif data == "league_menu":
-        await show_league_menu(callback, user, user_id)
-    elif data == "achievements":
-        await show_achievements(callback, user, user_id)
+        await callback.message.edit_text("✉️ پیام برای اعضا:", reply_markup=get_keyboard(uid))
+    elif data == "clan_upgrade": await upgrade_clan(callback, user, uid)
+    elif data == "clan_leave": await leave_clan(callback, user, uid)
+    elif data == "clan_disband": await disband_clan(callback, user, uid)
+    elif data == "league_menu": await show_league_menu(callback, user, uid)
+    elif data == "achievements": await show_achievements(callback, user, uid)
     elif data == "back":
-        await callback.message.edit_text("🔙 منوی اصلی", reply_markup=get_keyboard(user_id))
+        await callback.message.edit_text("🔙 منوی اصلی", reply_markup=get_keyboard(uid))
 
-async def edit_status(callback, user, user_id):
-    await callback.message.edit_text(build_status_text(user, user_id), reply_markup=get_keyboard(user_id))
+# ==================== زمین‌ها ====================
+async def show_lands_menu(callback, user, uid):
+    plots = user.get("plots", [])
+    max_plots = user.get("max_plots", 1)
+    
+    text = f"🏞️ **زمین‌های شما ({max_plots} زمین)**\n\n"
+    kb = InlineKeyboardBuilder()
+    
+    for i, p in enumerate(plots):
+        fruit = FRUITS[p.get("fruit", 0)]
+        if p["state"] == "growing":
+            rem = get_plot_remaining(p)
+            t = f"{rem//60}:{rem%60:02d}" if rem is not None else "..."
+            text += f"🏞 زمین {i+1}: ⏳ {fruit} ({t})\n"
+            kb.button(f"🏞{i+1} ⏳ {fruit}", callback_data="noop")
+        elif p["state"] == "harvested":
+            text += f"🏞 زمین {i+1}: 📦 {fruit} آماده برداشت\n"
+            kb.button(f"🏞{i+1} 📦 {fruit}", callback_data=f"harvest_{i}")
+        else:
+            text += f"🏞 زمین {i+1}: خالی (آماده کاشت)\n"
+            kb.button(f"🏞{i+1} 🌱 خالی", callback_data=f"buy_{i}")
+    
+    # نمایش قیمت زمین بعدی
+    next_price = get_land_price(max_plots)
+    if next_price:
+        text += f"\n🛒 **خرید زمین {max_plots+1}:** {next_price:,} سکه\n"
+        kb.button(f"🛒 خرید زمین ({next_price:,})", callback_data="buy_land")
+    else:
+        text += f"\n✅ حداکثر زمین‌ها را داری.\n"
+    
+    kb.button("📦 انبار", callback_data="inventory_menu")
+    kb.button("🔙 بازگشت", callback_data="back")
+    kb.adjust(2)
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
-async def switch_fruit(callback, user, user_id, idx):
-    if idx not in get_available_fruits(user):
-        await callback.message.edit_text("🔒 قفل است!", reply_markup=get_keyboard(user_id))
+async def show_inventory(callback, user, uid):
+    inv = user.get("inventory", {})
+    cap = get_inv_capacity(user)
+    count = get_inv_count(user)
+    
+    text = f"📦 **انبار ({count}/{cap})**\n\n"
+    kb = InlineKeyboardBuilder()
+    
+    if not inv:
+        text += "انبار خالیه!"
+    else:
+        for fruit_name, cnt in inv.items():
+            if fruit_name.startswith("طلایی_"):
+                real = fruit_name.replace("طلایی_", "")
+                text += f"✨ {real} (طلایی): {cnt} عدد\n"
+                # بذر طلایی برای کاشت استفاده می‌شه (پیاده‌سازی ساده)
+            else:
+                text += f"🍎 {fruit_name}: {cnt} عدد\n"
+                kb.button(f"💰 فروش {fruit_name}", callback_data=f"sell_inv_{fruit_name}")
+    
+    kb.button("🔙 بازگشت", callback_data="back")
+    kb.adjust(2)
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
+
+async def buy_land(callback, user, uid):
+    max_plots = user.get("max_plots", 1)
+    price = get_land_price(max_plots)
+    if price is None:
+        await callback.message.edit_text("✅ حداکثر زمین‌ها را داری.", reply_markup=get_keyboard(uid))
         return
-    update_user(user_id, {"current_fruit": idx})
-    await callback.message.edit_text(f"✅ میوه فعلی: {FRUITS[idx]}", reply_markup=get_keyboard(user_id))
+    if user["coins"] < price:
+        await callback.message.edit_text(f"❌ نیاز به {price:,} سکه.", reply_markup=get_keyboard(uid))
+        return
+    
+    plots = user.get("plots", [])
+    plots.append({"fruit": 0, "state": "idle", "harvest_time": None})
+    update_user(uid, {"coins": user["coins"] - price, "plots": plots, "max_plots": max_plots + 1})
+    update_leaderboard(uid, user["name"], user["coins"] - price, user["level"], user["prestige"])
+    await callback.message.edit_text(
+        f"🎉 **زمین {max_plots+1} خریداری شد!**\n💰 هزینه: {price:,} سکه\n🏞️ حالا {max_plots+1} زمین داری.",
+        reply_markup=get_keyboard(uid))
 
-async def buy_seed(callback, user, user_id):
-    cf = user["current_fruit"]
+async def buy_seed_for_plot(callback, user, uid, plot_idx):
+    """خرید بذر برای زمین مشخص"""
+    plots = user.get("plots", [])
+    if plot_idx >= len(plots):
+        await callback.message.edit_text("❌ زمین نامعتبر", reply_markup=get_keyboard(uid)); return
+    plot = plots[plot_idx]
+    
+    if plot["state"] == "growing":
+        await callback.message.edit_text("⏳ این زمین در حال رشده.", reply_markup=get_keyboard(uid)); return
+    if plot["state"] == "harvested":
+        await callback.message.edit_text("📦 اول برداشت کن.", reply_markup=get_keyboard(uid)); return
+    
+    # انتخاب میوه
+    available = get_available_fruits(user)
     effects, _ = get_season_effects()
-    buy_price = int(PRICES[cf][0] * user["prestige_multiplier"] * effects["buy_mult"])
+    mult = user["prestige_multiplier"]
     
-    if user["state"] == "growing":
-        await callback.message.edit_text("⏳ صبر کن.", reply_markup=get_keyboard(user_id)); return
-    if user["state"] == "harvested":
-        await callback.message.edit_text("🌱 اول بفروش.", reply_markup=get_keyboard(user_id)); return
+    text = f"🌱 **کاشت در زمین {plot_idx+1}**\n\nمیوه مورد نظر را انتخاب کن:\n\n"
+    kb = InlineKeyboardBuilder()
+    for i in available:
+        bp = int(PRICES[i][0] * mult * effects["buy_mult"])
+        text += f"• {FRUITS[i]}: {bp:,} سکه\n"
+        kb.button(f"🌱 {FRUITS[i]} ({bp:,})", callback_data=f"plant_plot_{plot_idx}_{i}")
+    kb.button("🔙 بازگشت", callback_data="lands_menu")
+    kb.adjust(1)
+    await callback.message.edit_text(text, reply_markup=kb.as_markup())
+
+async def plant_in_plot(callback, user, uid, plot_idx, fruit_idx):
+    plots = user.get("plots", [])
+    if plot_idx >= len(plots) or fruit_idx not in get_available_fruits(user):
+        return
+    
+    effects, _ = get_season_effects()
+    buy_price = int(PRICES[fruit_idx][0] * user["prestige_multiplier"] * effects["buy_mult"])
+    
     if user["coins"] < buy_price:
-        await callback.message.edit_text(f"❌ نیاز به {buy_price:,} سکه.", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text(f"❌ نیاز به {buy_price:,} سکه.", reply_markup=get_keyboard(uid)); return
     
-    growth_time = GROWTH_TIMES[cf] * effects["growth_mult"]
+    growth_time = GROWTH_TIMES[fruit_idx] * effects["growth_mult"]
     if user["upgrades"].get("auto_water", 0) > 0:
         growth_time *= 0.8
     speed_bonus = get_pet_effect(user, "speed")
@@ -1065,156 +1044,272 @@ async def buy_seed(callback, user, user_id):
         growth_time *= (1 - speed_bonus / 100)
     
     harvest_dt = datetime.now() + timedelta(minutes=growth_time)
+    plots[plot_idx] = {"fruit": fruit_idx, "state": "growing", "harvest_time": harvest_dt.isoformat()}
     
-    update_user(user_id, {
-        "coins": user["coins"] - buy_price,
-        "state": "growing",
-        "harvest_time": harvest_dt.isoformat(),
-    })
-    
-    mins = int(growth_time)
-    secs = int((growth_time - mins) * 60)
+    update_user(uid, {"coins": user["coins"] - buy_price, "plots": plots})
+    mins = int(growth_time); secs = int((growth_time - mins) * 60)
     await callback.message.edit_text(
-        f"🌱 {FRUITS[cf]} کاشته شد!\n⏳ زمان رسیدن: {mins}:{secs:02d} دقیقه",
-        reply_markup=get_keyboard(user_id)
-    )
+        f"🌱 {FRUITS[fruit_idx]} در زمین {plot_idx+1} کاشته شد!\n⏳ {mins}:{secs:02d} دقیقه",
+        reply_markup=get_keyboard(uid))
 
-async def sell_fruit(callback, user, user_id):
-    if user["state"] != "harvested":
-        await callback.message.edit_text("⏳ هنوز نرسیده!", reply_markup=get_keyboard(user_id)); return
+async def harvest_plot(callback, user, uid, plot_idx):
+    plots = user.get("plots", [])
+    if plot_idx >= len(plots): return
+    plot = plots[plot_idx]
+    if plot["state"] != "harvested":
+        await callback.message.edit_text("⏳ هنوز نرسیده.", reply_markup=get_keyboard(uid)); return
     
-    cf = user["current_fruit"]
+    fruit_name = FRUITS[plot.get("fruit", 0)]
+    if not add_to_inventory(uid, fruit_name):
+        await callback.message.edit_text(
+            f"📦 انبارت پره! ({get_inv_count(user)}/{get_inv_capacity(user)})\n"
+            f"اول از انبار بفروش یا یه میوه دیگه‌ای رو بفروش.",
+            reply_markup=get_keyboard(uid))
+        return
+    
+    plots[plot_idx] = {"fruit": 0, "state": "idle", "harvest_time": None}
+    update_user(uid, {"plots": plots})
+    await callback.message.edit_text(
+        f"📦 {fruit_name} به انبار اضافه شد!\n"
+        f"انبار: {get_inv_count(user) + 1}/{get_inv_capacity(user)}",
+        reply_markup=get_keyboard(uid))
+
+async def sell_immediate(callback, user, uid, plot_idx):
+    """فروش فوری از زمین (بدون رفتن به انبار)"""
+    plots = user.get("plots", [])
+    if plot_idx >= len(plots): return
+    plot = plots[plot_idx]
+    if plot["state"] != "harvested":
+        await callback.message.edit_text("⏳ هنوز نرسیده.", reply_markup=get_keyboard(uid)); return
+    
+    cf = plot.get("fruit", 0)
+    await do_sell(callback, user, uid, cf, plots, plot_idx)
+
+async def sell_from_inventory(callback, user, uid, fruit_name):
+    inv = user.get("inventory", {})
+    if inv.get(fruit_name, 0) < 1:
+        await callback.message.edit_text("❌ موجودی کافی نیست.", reply_markup=get_keyboard(uid)); return
+    try:
+        cf = FRUITS.index(fruit_name)
+    except ValueError:
+        await callback.message.edit_text("❌ میوه نامعتبر.", reply_markup=get_keyboard(uid)); return
+    
+    # فروش از انبار
+    inv[fruit_name] -= 1
+    if inv[fruit_name] <= 0: del inv[fruit_name]
+    
     effects, _ = get_season_effects()
     base_sell = int(PRICES[cf][1] * user["prestige_multiplier"] * effects["sell_mult"])
     sell_price = base_sell
     
-    pet_sell_bonus = get_pet_effect(user, "sell")
-    if pet_sell_bonus > 0:
-        sell_price += int(base_sell * pet_sell_bonus / 100)
-    
+    pet_bonus = get_pet_effect(user, "sell")
+    if pet_bonus > 0: sell_price += int(base_sell * pet_bonus / 100)
     clan_bonus = get_clan_bonus(user)
-    if clan_bonus > 0:
-        sell_price += int(base_sell * clan_bonus / 100)
-    
+    if clan_bonus > 0: sell_price += int(base_sell * clan_bonus / 100)
     if user["upgrades"].get("golden_pot", 0) > 0:
         sell_price = int(sell_price * (1 + 0.1 * user["upgrades"]["golden_pot"]))
     
     golden = random.random() < effects["golden_chance"]
-    if golden:
-        sell_price *= 2
+    if golden: sell_price *= 2
     
-    fruit_name = FRUITS[cf]
     xp_gain = int(xp_from_sale(fruit_name) * user["prestige_multiplier"])
-    pet_xp_bonus = get_pet_effect(user, "xp")
-    if pet_xp_bonus > 0:
-        xp_gain += int(xp_gain * pet_xp_bonus / 100)
+    pet_xp = get_pet_effect(user, "xp")
+    if pet_xp > 0: xp_gain += int(xp_gain * pet_xp / 100)
     
     new_coins = user["coins"] + sell_price
     new_xp = user["xp"] + xp_gain
     new_level = user["level"]
     level_up_msg = ""
-    xp_needed = xp_needed_for(new_level)
-    while new_xp >= xp_needed and new_level < 7:
-        new_xp -= xp_needed
-        new_level += 1
-        xp_needed = xp_needed_for(new_level)
-        level_up_msg = f"\n🎉 **لول آپ! لول {new_level}!**"
+    xn = xp_needed_for(new_level)
+    while new_xp >= xn and new_level < 7:
+        new_xp -= xn; new_level += 1
+        xn = xp_needed_for(new_level)
+        level_up_msg = f"\n🎉 لول {new_level}!"
     
-    update_user(user_id, {"coins": new_coins, "xp": new_xp, "level": new_level,
-                           "state": "idle", "harvest_time": None})
-    update_leaderboard(user_id, user["name"], new_coins, new_level, user["prestige"])
+    update_user(uid, {"coins": new_coins, "xp": new_xp, "level": new_level, "inventory": inv})
+    update_leaderboard(uid, user["name"], new_coins, new_level, user["prestige"])
+    upd = get_user(uid)
+    profit = upd["coins"] - upd.get("period_start_coins", 1)
+    update_league_profit(uid, upd, profit)
     
-    updated_user = get_user(user_id)
-    profit = updated_user["coins"] - updated_user.get("period_start_coins", 1)
-    update_league_profit(user_id, updated_user, profit)
-    
-    golden_text = " ✨(طلایی!)" if golden else ""
+    gt = " ✨(طلایی!)" if golden else ""
     await callback.message.edit_text(
-        f"✅ {fruit_name} فروخته شد{golden_text}\n"
-        f"💵 قیمت پایه: {base_sell:,}\n"
-        f"💰 دریافت نهایی: +{sell_price:,}\n"
+        f"✅ {fruit_name} فروخته شد{gt}\n"
+        f"💵 پایه: {base_sell:,}\n"
+        f"💰 نهایی: +{sell_price:,}\n"
         f"⭐ +{xp_gain} XP\n"
-        f"📈 لول {new_level} (XP: {new_xp}/{xp_needed_for(new_level)}){level_up_msg}",
-        reply_markup=get_keyboard(user_id))
+        f"📈 لول {new_level}{level_up_msg}",
+        reply_markup=get_keyboard(uid))
 
-async def show_leaderboard(callback, user, user_id):
+async def do_sell(callback, user, uid, cf, plots, plot_idx):
+    effects, _ = get_season_effects()
+    base_sell = int(PRICES[cf][1] * user["prestige_multiplier"] * effects["sell_mult"])
+    sell_price = base_sell
+    
+    pet_bonus = get_pet_effect(user, "sell")
+    if pet_bonus > 0: sell_price += int(base_sell * pet_bonus / 100)
+    clan_bonus = get_clan_bonus(user)
+    if clan_bonus > 0: sell_price += int(base_sell * clan_bonus / 100)
+    if user["upgrades"].get("golden_pot", 0) > 0:
+        sell_price = int(sell_price * (1 + 0.1 * user["upgrades"]["golden_pot"]))
+    
+    golden = random.random() < effects["golden_chance"]
+    if golden: sell_price *= 2
+    
+    fruit_name = FRUITS[cf]
+    xp_gain = int(xp_from_sale(fruit_name) * user["prestige_multiplier"])
+    pet_xp = get_pet_effect(user, "xp")
+    if pet_xp > 0: xp_gain += int(xp_gain * pet_xp / 100)
+    
+    new_coins = user["coins"] + sell_price
+    new_xp = user["xp"] + xp_gain
+    new_level = user["level"]
+    level_up_msg = ""
+    xn = xp_needed_for(new_level)
+    while new_xp >= xn and new_level < 7:
+        new_xp -= xn; new_level += 1
+        xn = xp_needed_for(new_level)
+        level_up_msg = f"\n🎉 لول {new_level}!"
+    
+    plots[plot_idx] = {"fruit": 0, "state": "idle", "harvest_time": None}
+    update_user(uid, {"coins": new_coins, "xp": new_xp, "level": new_level, "plots": plots})
+    update_leaderboard(uid, user["name"], new_coins, new_level, user["prestige"])
+    upd = get_user(uid)
+    update_league_profit(uid, upd, upd["coins"] - upd.get("period_start_coins", 1))
+    
+    gt = " ✨(طلایی!)" if golden else ""
+    await callback.message.edit_text(
+        f"✅ {fruit_name} فروخته شد{gt}\n💵 پایه: {base_sell:,}\n💰 نهایی: +{sell_price:,}\n"
+        f"⭐ +{xp_gain} XP\n📈 لول {new_level}{level_up_msg}",
+        reply_markup=get_keyboard(uid))
+
+async def edit_status(callback, user, uid):
+    await callback.message.edit_text(build_status_text(user, uid), reply_markup=get_keyboard(uid))
+
+async def switch_fruit(callback, user, uid, idx):
+    if idx not in get_available_fruits(user):
+        await callback.message.edit_text("🔒 قفل!", reply_markup=get_keyboard(uid)); return
+    update_user(uid, {"current_fruit": idx})
+    await callback.message.edit_text(f"✅ انتخاب: {FRUITS[idx]}", reply_markup=get_keyboard(uid))
+
+async def buy_seed(callback, user, uid):
+    """خرید بذر برای حالت تک‌زمینی"""
+    plot_idx = 0
+    plots = user.get("plots", [])
+    if not plots: return
+    plot = plots[plot_idx]
+    cf = plot.get("fruit", 0)
+    effects, _ = get_season_effects()
+    buy_price = int(PRICES[cf][0] * user["prestige_multiplier"] * effects["buy_mult"])
+    
+    if plot["state"] == "growing":
+        await callback.message.edit_text("⏳ در حال رشده.", reply_markup=get_keyboard(uid)); return
+    if plot["state"] == "harvested":
+        await callback.message.edit_text("📦 اول برداشت کن.", reply_markup=get_keyboard(uid)); return
+    if user["coins"] < buy_price:
+        await callback.message.edit_text(f"❌ نیاز به {buy_price:,}", reply_markup=get_keyboard(uid)); return
+    
+    growth_time = GROWTH_TIMES[cf] * effects["growth_mult"]
+    if user["upgrades"].get("auto_water", 0) > 0: growth_time *= 0.8
+    sb = get_pet_effect(user, "speed")
+    if sb > 0: growth_time *= (1 - sb / 100)
+    
+    harvest_dt = datetime.now() + timedelta(minutes=growth_time)
+    plots[plot_idx] = {"fruit": cf, "state": "growing", "harvest_time": harvest_dt.isoformat()}
+    update_user(uid, {"coins": user["coins"] - buy_price, "plots": plots})
+    mins = int(growth_time); secs = int((growth_time - mins) * 60)
+    await callback.message.edit_text(f"🌱 کاشته شد! {mins}:{secs:02d} دیگه می‌رسه.", reply_markup=get_keyboard(uid))
+
+# ==================== بقیه (مختصر) ====================
+async def show_leaderboard(callback, user, uid):
     data = load_data()
     lb = data["leaderboard"][:10]
-    text = "🏆 **لیدربرد کلی:**\n\n"
+    text = "🏆 **لیدربرد:**\n\n"
     for i, item in enumerate(lb, 1):
         p = f"⭐{item['prestige']}" if item['prestige'] > 0 else ""
         text += f"{i}. {item['name']} {p} — لول {item['level']} | {item['coins']:,}\n"
-    if not lb: text += "هنوز کسی نیست!"
-    await callback.message.edit_text(text, reply_markup=get_keyboard(user_id))
+    if not lb: text += "خالیه!"
+    await callback.message.edit_text(text, reply_markup=get_keyboard(uid))
 
-async def show_upgrades(callback, user, user_id):
+async def show_upgrades(callback, user, uid):
     u = user["upgrades"]
     c1 = 1000 * (u.get("auto_water", 0) + 1)
     c2 = 2000 * (u.get("golden_pot", 0) + 1)
     c3 = 5000 * (u.get("professional_seeder", 0) + 1)
-    text = (f"🔧 **ارتقاء ابزار:**\n\n"
-            f"💧 آبیاری خودکار — {c1:,} (خرید: {u.get('auto_water',0)})\n"
-            f"🏺 گلدان طلایی — {c2:,} (خرید: {u.get('golden_pot',0)})\n"
+    max_plots = user.get("max_plots", 1)
+    land_price = get_land_price(max_plots)
+    
+    text = (f"🔧 **ارتقاء:**\n\n💧 آبیاری — {c1:,} (خرید: {u.get('auto_water',0)})\n"
+            f"🏺 گلدان — {c2:,} (خرید: {u.get('golden_pot',0)})\n"
             f"🌱 بذرپاش — {c3:,} (خرید: {u.get('professional_seeder',0)})\n")
+    
     kb = InlineKeyboardBuilder()
     kb.button(f"💧 ({c1:,})", callback_data="upgrade_auto_water")
     kb.button(f"🏺 ({c2:,})", callback_data="upgrade_golden_pot")
     kb.button(f"🌱 ({c3:,})", callback_data="upgrade_professional_seeder")
+    
+    if land_price:
+        text += f"\n🏞️ **زمین {max_plots+1}:** {land_price:,} سکه"
+        kb.button(f"🏞️ خرید زمین ({land_price:,})", callback_data="buy_land")
+    
     kb.button("🔙", callback_data="back")
     kb.adjust(1)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
-async def buy_upgrade(callback, user, user_id, key):
+async def buy_upgrade(callback, user, uid, key):
     base = {"auto_water": 1000, "golden_pot": 2000, "professional_seeder": 5000}
     if key not in base: return
     count = user["upgrades"].get(key, 0)
     cost = base[key] * (count + 1)
     if user["coins"] < cost:
-        await callback.message.edit_text(f"❌ نیاز به {cost:,}", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text(f"❌ نیاز به {cost:,}", reply_markup=get_keyboard(uid)); return
     u = user["upgrades"]; u[key] = count + 1
-    update_user(user_id, {"coins": user["coins"] - cost, "upgrades": u})
-    await callback.message.edit_text(f"✅ ارتقاء انجام شد!", reply_markup=get_keyboard(user_id))
+    update_user(uid, {"coins": user["coins"] - cost, "upgrades": u})
+    await callback.message.edit_text(f"✅ ارتقاء انجام شد!", reply_markup=get_keyboard(uid))
 
-async def show_daily_orders(callback, user, user_id):
+async def show_daily_orders(callback, user, uid):
     today = datetime.now().strftime("%Y-%m-%d")
     if user["daily_orders"]["date"] != today:
         orders = [{"fruit": FRUITS[random.randint(0, len(FRUITS)-2)], "count": random.randint(1, 3)} for _ in range(3)]
-        update_user(user_id, {"daily_orders": {"date": today, "orders": orders, "completed": False}})
-        user = get_user(user_id)
+        update_user(uid, {"daily_orders": {"date": today, "orders": orders, "completed": False}})
+        user = get_user(uid)
     orders = user["daily_orders"]["orders"]
     if user["daily_orders"]["completed"]:
-        await callback.message.edit_text("📦 امروز تکمیل شده!", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text("📦 امروز تکمیل شده!", reply_markup=get_keyboard(uid)); return
+    inv = user.get("inventory", {})
     text = "📦 **سفارشات:**\n\n"
     for i, o in enumerate(orders, 1):
-        text += f"{i}. {o['count']} عدد {o['fruit']}\n"
+        have = inv.get(o["fruit"], 0)
+        have_it = "✅" if have >= o["count"] else "❌"
+        text += f"{i}. {o['count']} عدد {o['fruit']} ({have_it} داری: {have})\n"
     kb = InlineKeyboardBuilder()
     kb.button("✅ تکمیل", callback_data="complete_orders")
     kb.button("🔙", callback_data="back")
     kb.adjust(1)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
-async def complete_orders(callback, user, user_id):
+async def complete_orders(callback, user, uid):
     if user["daily_orders"]["completed"]:
-        await callback.message.edit_text("قبلاً تکمیل شده!", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text("قبلاً تکمیل شده!", reply_markup=get_keyboard(uid)); return
     orders = user["daily_orders"]["orders"]
-    inv = user.get("inventory", [])
+    inv = user.get("inventory", {})
     for o in orders:
-        if inv.count(o["fruit"]) < o["count"]:
-            await callback.message.edit_text(f"❌ کمبود {o['fruit']}", reply_markup=get_keyboard(user_id)); return
+        if inv.get(o["fruit"], 0) < o["count"]:
+            await callback.message.edit_text(f"❌ کمبود {o['fruit']}", reply_markup=get_keyboard(uid)); return
     for o in orders:
-        for _ in range(o["count"]): inv.remove(o["fruit"])
+        inv[o["fruit"]] -= o["count"]
+        if inv[o["fruit"]] <= 0: del inv[o["fruit"]]
     bonus = int(sum(PRICES[FRUITS.index(o["fruit"])][1] * o["count"] * 1.5 for o in orders) * user["prestige_multiplier"])
     new_coins = user["coins"] + bonus
-    update_user(user_id, {"coins": new_coins, "inventory": inv,
-                           "daily_orders": {**user["daily_orders"], "completed": True}})
-    update_leaderboard(user_id, user["name"], new_coins, user["level"], user["prestige"])
-    await callback.message.edit_text(f"✅ +{bonus:,} سکه", reply_markup=get_keyboard(user_id))
+    update_user(uid, {"coins": new_coins, "inventory": inv,
+                       "daily_orders": {**user["daily_orders"], "completed": True}})
+    update_leaderboard(uid, user["name"], new_coins, user["level"], user["prestige"])
+    await callback.message.edit_text(f"✅ +{bonus:,} سکه", reply_markup=get_keyboard(uid))
 
-# ==================== ✅ فروشگاه (نمایش + ارسال فاکتور) ====================
-async def show_shop(callback, user, user_id):
+async def show_shop(callback, user, uid):
     level = user["level"]
     if level < 4 and user.get("prestige", 0) == 0:
-        await callback.message.edit_text("🔒 فروشگاه در لول ۴ باز می‌شود.", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text("🔒 لول ۴ باز می‌شود.", reply_markup=get_keyboard(uid)); return
     prices = SHOP_PRICES.get(level, SHOP_PRICES[7])
     text = "🛒 **فروشگاه سکه**\n\n💰 با توجه به لول شما، مقدار سکه‌ها متفاوت است.\n\n"
     for amt, c in prices.items():
@@ -1223,354 +1318,276 @@ async def show_shop(callback, user, user_id):
         elif amt == 70000: text += " + 🦅 ققنوس"
         elif amt == 100000: text += " + بذر طلایی ✨"
         text += "\n"
-    
-    if user.get("phoenix_owned"):
-        text += "\n⚠️ شما صاحب ققنوس هستید و ققنوس دائمی است."
-    
     kb = InlineKeyboardBuilder()
-    kb.button("۵,۰۰۰", callback_data="shop_5000")
-    kb.button("۱۰,۰۰۰", callback_data="shop_10000")
-    kb.button("۲۰,۰۰۰", callback_data="shop_20000")
-    kb.button("۵۰,۰۰۰", callback_data="shop_50000")
-    if not user.get("phoenix_owned"):
-        kb.button("۷۰,۰۰۰ 🦅", callback_data="shop_70000")
-    kb.button("۱۰۰,۰۰۰ ✨", callback_data="shop_100000")
+    for amt in prices:
+        label = f"{amt:,} تومان"
+        if amt == 70000: label += " 🦅"
+        elif amt == 100000: label += " ✨"
+        if amt == 70000 and user.get("phoenix_owned"):
+            continue
+        kb.button(label, callback_data=f"shop_{amt}")
     kb.button("🔙", callback_data="back")
-    kb.adjust(2, 2, 1, 1)
+    kb.adjust(2)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
-async def buy_shop(callback, user, user_id, amount):
+async def buy_shop(callback, user, uid, amount):
     level = user["level"] if user.get("prestige", 0) == 0 else 7
     prices = SHOP_PRICES.get(level, SHOP_PRICES[7])
-    if amount not in prices:
-        return
-    
+    if amount not in prices: return
     coins = prices[amount]
-    price_in_rials = amount * 10  # تومان → ریال
+    price_rials = amount * 10
+    update_user(uid, {"pending_purchase": {"amount": amount, "coins": coins, "created_at": datetime.now().isoformat()}})
     
-    # ذخیره‌ی خرید در انتظار
-    update_user(user_id, {
-        "pending_purchase": {
-            "amount": amount,
-            "coins": coins,
-            "created_at": datetime.now().isoformat()
-        }
-    })
-    
-    # تعیین payload
     if amount == 70000:
         payload = f"shop_{amount}_{coins}_phoenix"
-        title = "خرید ققنوس + سکه"
-        desc = f"بسته‌ی ویژه: {coins:,} سکه + پت ققنوس 🦅"
+        title = "خرید ققنوس"
+        desc = f"{coins:,} سکه + 🦅 ققنوس"
     else:
         payload = f"shop_{amount}_{coins}"
         title = f"خرید {coins:,} سکه"
-        desc = f"بسته‌ی {amount:,} تومانی فارمینگ"
+        desc = f"بسته‌ی {amount:,} تومانی"
     
     try:
-        await bot.send_invoice(
-            chat_id=user_id,
-            title=title,
-            description=desc,
-            payload=payload,
-            provider_token=PROVIDER_TOKEN,
-            currency="IRR",
-            prices=[
-                {"label": f"{coins:,} سکه" + (" + ققنوس" if amount == 70000 else ""),
-                 "amount": price_in_rials}
-            ],
-        )
-        # پیام قبلی رو پاک کن (اختیاری)
-        try:
-            await callback.message.delete()
-        except Exception:
-            pass
+        await bot.send_invoice(chat_id=uid, title=title, description=desc,
+                                payload=payload, provider_token=PROVIDER_TOKEN,
+                                currency="IRR",
+                                prices=[{"label": f"{coins:,} سکه", "amount": price_rials}])
+        try: await callback.message.delete()
+        except: pass
     except Exception as e:
-        await callback.message.edit_text(
-            f"❌ خطا در ارسال فاکتور!\n\n`{str(e)[:250]}`\n\n"
-            f"اگه توکن پرداخت تنظیم نشده، با @BotFather بله تماس بگیر.",
-            reply_markup=get_keyboard(user_id)
-        )
+        await callback.message.edit_text(f"❌ خطا: `{str(e)[:200]}`", reply_markup=get_keyboard(uid))
 
-async def show_worker(callback, user, user_id):
+async def show_worker(callback, user, uid):
     w = user["worker"]; cost = 5000 * w["level"]
-    text = f"👷 **کارگر**\nلول: {w['level']}\nوضعیت: {'فعال ✅' if w['active'] else 'غیرفعال ❌'}\nهزینه ارتقاء: {cost:,}"
+    text = f"👷 **کارگر**\nلول: {w['level']}\n{'فعال ✅' if w['active'] else 'غیرفعال ❌'}\nهزینه ارتقاء: {cost:,}"
     kb = InlineKeyboardBuilder()
-    kb.button("🔄 فعال/غیرفعال", callback_data="worker_toggle")
-    kb.button("⬆️ ارتقاء", callback_data="worker_upgrade")
+    kb.button("🔄", callback_data="worker_toggle")
+    kb.button("⬆️", callback_data="worker_upgrade")
     kb.button("🔙", callback_data="back")
     kb.adjust(1)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
-async def toggle_worker(callback, user, user_id):
+async def toggle_worker(callback, user, uid):
     w = user["worker"]; w["active"] = not w["active"]
-    update_user(user_id, {"worker": w})
-    await callback.message.edit_text(f"👷 {'فعال' if w['active'] else 'غیرفعال'}", reply_markup=get_keyboard(user_id))
+    update_user(uid, {"worker": w})
+    await callback.message.edit_text(f"👷 {'فعال' if w['active'] else 'غیرفعال'}", reply_markup=get_keyboard(uid))
 
-async def upgrade_worker(callback, user, user_id):
+async def upgrade_worker(callback, user, uid):
     w = user["worker"]; cost = 5000 * w["level"]
     if user["coins"] < cost:
-        await callback.message.edit_text(f"❌ نیاز به {cost:,}", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text(f"❌ نیاز به {cost:,}", reply_markup=get_keyboard(uid)); return
     w["level"] += 1
-    update_user(user_id, {"coins": user["coins"] - cost, "worker": w})
-    await callback.message.edit_text(f"✅ لول {w['level']}", reply_markup=get_keyboard(user_id))
+    update_user(uid, {"coins": user["coins"] - cost, "worker": w})
+    await callback.message.edit_text(f"✅ لول {w['level']}", reply_markup=get_keyboard(uid))
 
-async def start_gift(callback, user, user_id, state):
+async def start_gift(callback, user, uid, state):
     await state.set_state(UserForm.gift_target)
-    await callback.message.edit_text("🎁 نام یا کد کاربر مقصد:", reply_markup=get_keyboard(user_id))
+    await callback.message.edit_text("🎁 نام یا کد کاربر:", reply_markup=get_keyboard(uid))
 
-async def show_prestige(callback, user, user_id):
+async def show_prestige(callback, user, uid):
     if user["level"] < 7:
-        await callback.message.edit_text("🔒 پرستیژ در لول ۷ باز می‌شود.", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text("🔒 لول ۷", reply_markup=get_keyboard(uid)); return
     if user["prestige"] >= 10:
-        await callback.message.edit_text("⭐ بالاترین پرستیژ!", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text("⭐ حداکثر!", reply_markup=get_keyboard(uid)); return
     nxt = user["prestige"] + 1
     price = PRESTIGE_PRICES[nxt]
-    text = (f"⭐ **پرستیژ {nxt}**\nهزینه: {price:,}\n"
-            f"ضریب جدید: {user['prestige_multiplier']*1.5:.2f}x\n\n"
-            f"⚠️ همه چیز ریست می‌شود (به‌جز نام، پرستیژ، کلن و ققنوس)")
+    text = (f"⭐ **پرستیژ {nxt}**\nهزینه: {price:,}\nضریب: {user['prestige_multiplier']*1.5:.2f}x\n\n"
+            f"⚠️ ریست: سکه، لول، XP، انبار، زمین‌ها\n✅ باقی: نام، پرستیژ، کلن، ققنوس، افتخارات")
     kb = InlineKeyboardBuilder()
-    kb.button(f"⭐ خرید ({price:,})", callback_data="buy_prestige")
+    kb.button(f"⭐ خرید", callback_data="buy_prestige")
     kb.button("🔙", callback_data="back")
     kb.adjust(1)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
-async def buy_prestige(callback, user, user_id):
+async def buy_prestige(callback, user, uid):
     if user["prestige"] >= 10: return
     nxt = user["prestige"] + 1
     price = PRESTIGE_PRICES[nxt]
     if user["coins"] < price:
-        await callback.message.edit_text(f"❌ نیاز به {price:,}", reply_markup=get_keyboard(user_id)); return
-    new_user = create_default_user(user_id)
-    new_user["name"] = user["name"]
-    new_user["prestige"] = nxt
-    new_user["prestige_multiplier"] = user["prestige_multiplier"] * 1.5
-    new_user["referral_code"] = user["referral_code"]
-    new_user["gifts_given"] = user.get("gifts_given", 0)
-    new_user["gifts_received"] = user.get("gifts_received", 0)
-    new_user["achievements"] = user.get("achievements", [])
-    new_user["clan_id"] = user.get("clan_id")
-    new_user["phoenix_owned"] = user.get("phoenix_owned", False)  # ✅ ققنوس حفظ می‌شه
-    if new_user["phoenix_owned"]:
-        new_user["pet"] = PHOENIX_PET  # ✅ پت ققنوس هم حفظ می‌شه
-    new_user["last_seen_period"] = get_period_number()
-    new_user["current_period"] = get_period_number()
+        await callback.message.edit_text(f"❌ نیاز به {price:,}", reply_markup=get_keyboard(uid)); return
+    nu = create_default_user(uid)
+    nu["name"] = user["name"]
+    nu["prestige"] = nxt
+    nu["prestige_multiplier"] = user["prestige_multiplier"] * 1.5
+    nu["referral_code"] = user["referral_code"]
+    nu["gifts_given"] = user.get("gifts_given", 0)
+    nu["gifts_received"] = user.get("gifts_received", 0)
+    nu["achievements"] = user.get("achievements", [])
+    nu["clan_id"] = user.get("clan_id")
+    nu["phoenix_owned"] = user.get("phoenix_owned", False)
+    if nu["phoenix_owned"]: nu["pet"] = PHOENIX_PET
+    nu["last_seen_period"] = get_period_number()
+    nu["current_period"] = get_period_number()
     data = load_data()
-    data["users"][str(user_id)] = new_user
+    data["users"][str(uid)] = nu
     save_data(data)
-    update_leaderboard(user_id, user["name"], 1, 1, nxt)
-    await callback.message.edit_text(
-        f"⭐ **تبریک! پرستیژ {nxt}!**\nضریب: {new_user['prestige_multiplier']:.2f}x",
-        reply_markup=get_keyboard(user_id))
+    update_leaderboard(uid, user["name"], 1, 1, nxt)
+    await callback.message.edit_text(f"⭐ **پرستیژ {nxt}!**\nضریب: {nu['prestige_multiplier']:.2f}x",
+                                       reply_markup=get_keyboard(uid))
 
-# ---------- پت ----------
-async def show_pet_menu(callback, user, user_id):
+async def show_pet_menu(callback, user, uid):
     pet = user.get("pet")
     if pet:
-        type_fa = {"sell": "سود", "speed": "سرعت", "xp": "XP"}
-        pet_text = f"{pet['emoji']} {pet['name']} (+{pet['value']}٪ {type_fa.get(pet['type'], '')})"
-    else:
-        pet_text = "ندارد"
-    
-    text = f"🐾 **پت شما:** {pet_text}\n\n"
+        tfa = {"sell": "سود", "speed": "سرعت", "xp": "XP"}
+        pet_text = f"{pet['emoji']} {pet['name']} (+{pet['value']}٪ {tfa.get(pet['type'], '')})"
+    else: pet_text = "ندارد"
     
     if user.get("phoenix_owned"):
-        text += "⚠️ شما صاحب **ققنوس** هستید. امکان اسپین وجود ندارد.\n"
-        text += "ققنوس دائمی است و با پرستیژ هم از بین نمی‌رود."
+        text = f"🐾 **پت:** {pet_text}\n\n⚠️ شما صاحب ققنوس هستید. اسپین ممکن نیست."
         kb = InlineKeyboardBuilder()
         kb.button("🔙", callback_data="back")
-        await callback.message.edit_text(text, reply_markup=kb.as_markup())
-        return
+        await callback.message.edit_text(text, reply_markup=kb.as_markup()); return
     
-    text += "🥚 **تخم‌ها:**\n"
+    text = f"🐾 **پت:** {pet_text}\n\n🥚 **تخم‌ها:**\n"
     for k, egg in PET_EGGS.items():
-        text += f"• {egg['name']}: {egg['price']:,} سکه\n"
-    text += "\n⚠️ با هر اسپین، پت فعلی از بین می‌رود!"
+        text += f"• {egg['name']}: {egg['price']:,}\n"
+    text += "\n⚠️ اسپین، پت قبلی رو نابود می‌کنه!"
     kb = InlineKeyboardBuilder()
     for k, egg in PET_EGGS.items():
         short = {"common":"معمولی","uncommon":"غیرمعمولی","rare":"کمیاب",
                  "epic":"حماسی","legendary":"افسانه‌ای","mythic":"اساطیری"}[k]
-        kb.button(f"{short} ({egg['price']:,})", callback_data=f"spin_{k}")
+        kb.button(f"{short}", callback_data=f"spin_{k}")
     kb.button("🔙", callback_data="back")
-    kb.adjust(2, 2, 2, 1)
+    kb.adjust(2)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
-async def do_spin(callback, user, user_id, egg_type):
-    # ✅ قفل اسپین اگه ققنوس داره
+async def do_spin(callback, user, uid, egg_type):
     if user.get("phoenix_owned"):
-        await callback.message.edit_text(
-            "🦅 شما صاحب **ققنوس** هستید و امکان اسپین ندارید.\n"
-            "ققنوس دائمی است و از بین نمی‌رود.",
-            reply_markup=get_keyboard(user_id)
-        )
-        return
-    
+        await callback.message.edit_text("🦅 ققنوس داری!", reply_markup=get_keyboard(uid)); return
     if egg_type not in PET_EGGS: return
     egg = PET_EGGS[egg_type]
     if user["coins"] < egg["price"]:
-        await callback.message.edit_text(f"❌ نیاز به {egg['price']:,} سکه.", reply_markup=get_keyboard(user_id)); return
-    new_pet = spin_egg(egg_type)
-    if not new_pet: return
-    new_coins = user["coins"] - egg["price"]
-    update_user(user_id, {"coins": new_coins, "pet": new_pet})
-    update_leaderboard(user_id, user["name"], new_coins, user["level"], user["prestige"])
-    type_fa = {"sell": "سود بیشتر", "speed": "رشد سریع‌تر", "xp": "XP بیشتر"}
-    await callback.message.edit_text(
-        f"🥚 **{egg['name']}** باز شد!\n\n"
-        f"{new_pet['emoji']} **{new_pet['name']}**\n"
-        f"قابلیت: {new_pet['value']}٪ {type_fa[new_pet['type']]}\n\n"
-        f"💰 موجودی: {new_coins:,}",
-        reply_markup=get_keyboard(user_id))
+        await callback.message.edit_text(f"❌ نیاز به {egg['price']:,}", reply_markup=get_keyboard(uid)); return
+    np = spin_egg(egg_type)
+    if not np: return
+    nc = user["coins"] - egg["price"]
+    update_user(uid, {"coins": nc, "pet": np})
+    update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
+    tfa = {"sell": "سود", "speed": "سرعت", "xp": "XP"}
+    await callback.message.edit_text(f"🥚 {egg['name']}\n\n{np['emoji']} **{np['name']}**\n+{np['value']}٪ {tfa[np['type']]}\n\n💰 {nc:,}",
+                                       reply_markup=get_keyboard(uid))
 
-# ---------- کلن ----------
-async def show_clan_menu(callback, user, user_id):
+async def show_clan_menu(callback, user, uid):
     if not user.get("clan_id"):
-        text = (f"🏰 **کلن نداری**\n\n"
-                f"ساخت کلن: {CLAN_CREATE_COST:,} سکه\n"
-                f"مزایا: +۲٪ سود به ازای هر لول کلن")
+        text = f"🏰 **بدون کلن**\n\nساخت: {CLAN_CREATE_COST:,} سکه"
         kb = InlineKeyboardBuilder()
-        kb.button("🏰 ساخت کلن", callback_data="clan_create")
+        kb.button("🏰 ساخت", callback_data="clan_create")
         kb.button("🔙", callback_data="back")
         kb.adjust(1)
         await callback.message.edit_text(text, reply_markup=kb.as_markup())
-    else:
-        await show_clan_info(callback, user, user_id)
+    else: await show_clan_info(callback, user, uid)
 
-async def show_clan_info(callback, user, user_id):
+async def show_clan_info(callback, user, uid):
     clan = get_clan(user["clan_id"])
     if not clan:
-        await callback.message.edit_text("❌ کلن یافت نشد.", reply_markup=get_keyboard(user_id)); return
-    is_leader = clan["leader_id"] == str(user_id)
-    text = (f"🏰 **{clan['name']}**\n"
-            f"لول: {clan['level']} | پاداش: +{clan['level']*CLAN_BONUS_PER_LEVEL}٪ سود\n"
-            f"خزانه: {clan['treasury']:,} سکه\n"
-            f"اعضا: {len(clan['members'])}/{CLAN_MAX_MEMBERS.get(clan['level'],10)}\n"
-            f"لیدر: {clan['leader_name']}\n\n"
-            f"👥 **اعضا:**\n")
+        await callback.message.edit_text("❌ یافت نشد", reply_markup=get_keyboard(uid)); return
+    is_leader = clan["leader_id"] == str(uid)
+    text = (f"🏰 **{clan['name']}**\nلول: {clan['level']} | +{clan['level']*CLAN_BONUS_PER_LEVEL}٪\n"
+            f"خزانه: {clan['treasury']:,}\nاعضا: {len(clan['members'])}/{CLAN_MAX_MEMBERS.get(clan['level'],10)}\n"
+            f"لیدر: {clan['leader_name']}\n\n👥\n")
     for m in clan["members"][:20]:
-        mn = clan["member_names"].get(m, "?")
-        text += f"• {mn}\n"
+        text += f"• {clan['member_names'].get(m, '?')}\n"
     kb = InlineKeyboardBuilder()
     kb.button("👤 دعوت", callback_data="clan_invite")
     kb.button("💰 اهدا", callback_data="clan_donate")
     kb.button("✉️ چت", callback_data="clan_chat")
     if is_leader:
-        kb.button("⬆️ ارتقاء کلن", callback_data="clan_upgrade")
+        kb.button("⬆️ ارتقاء", callback_data="clan_upgrade")
         kb.button("🗑 منحل", callback_data="clan_disband")
     else:
         kb.button("🚪 خروج", callback_data="clan_leave")
     kb.button("🔙", callback_data="back")
-    kb.adjust(2, 2, 2, 1)
+    kb.adjust(2)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
-async def start_clan_create(callback, user, user_id, state):
+async def start_clan_create(callback, user, uid, state):
     if user["coins"] < CLAN_CREATE_COST:
-        await callback.message.edit_text(f"❌ نیاز به {CLAN_CREATE_COST:,} سکه.", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text(f"❌ نیاز به {CLAN_CREATE_COST:,}", reply_markup=get_keyboard(uid)); return
     await state.set_state(UserForm.clan_name)
-    await callback.message.edit_text("🏰 نام کلن را وارد کن (۳-۲۰ کاراکتر، بدون فاصله):")
+    await callback.message.edit_text("🏰 نام کلن (۳-۲۰ کاراکتر):")
 
-async def upgrade_clan(callback, user, user_id):
+async def upgrade_clan(callback, user, uid):
     clan = get_clan(user["clan_id"])
-    if not clan: return
-    if clan["level"] >= 10:
-        await callback.message.edit_text("⭐ کلن در بالاترین لول!", reply_markup=get_keyboard(user_id)); return
-    nxt = clan["level"] + 1
-    cost = CLAN_LEVEL_COSTS[nxt]
+    if not clan or clan["level"] >= 10: return
+    nxt = clan["level"] + 1; cost = CLAN_LEVEL_COSTS[nxt]
     if clan["treasury"] < cost:
-        await callback.message.edit_text(f"❌ خزانه کافی نیست. نیاز: {cost:,}", reply_markup=get_keyboard(user_id)); return
+        await callback.message.edit_text(f"❌ نیاز خزانه: {cost:,}", reply_markup=get_keyboard(uid)); return
     data = load_data()
     data["clans"][user["clan_id"]]["level"] = nxt
     data["clans"][user["clan_id"]]["treasury"] -= cost
     save_data(data)
-    await callback.message.edit_text(f"✅ کلن به لول {nxt} ارتقاء یافت!", reply_markup=get_keyboard(user_id))
+    await callback.message.edit_text(f"✅ لول {nxt}!", reply_markup=get_keyboard(uid))
 
-async def leave_clan(callback, user, user_id):
+async def leave_clan(callback, user, uid):
     clan = get_clan(user["clan_id"])
     if not clan: return
-    if clan["leader_id"] == str(user_id):
-        await callback.message.edit_text("❌ لیدر نمی‌تواند خارج شود. کلن را منحل کن.", reply_markup=get_keyboard(user_id)); return
+    if clan["leader_id"] == str(uid):
+        await callback.message.edit_text("❌ لیدر منحل کن.", reply_markup=get_keyboard(uid)); return
     data = load_data()
-    if str(user_id) in data["clans"][user["clan_id"]]["members"]:
-        data["clans"][user["clan_id"]]["members"].remove(str(user_id))
-    data["clans"][user["clan_id"]]["member_names"].pop(str(user_id), None)
+    data["clans"][user["clan_id"]]["members"].remove(str(uid))
+    data["clans"][user["clan_id"]]["member_names"].pop(str(uid), None)
     save_data(data)
-    update_user(user_id, {"clan_id": None})
-    await callback.message.edit_text("🚪 از کلن خارج شدی.", reply_markup=get_keyboard(user_id))
+    update_user(uid, {"clan_id": None})
+    await callback.message.edit_text("🚪 خارج شدی", reply_markup=get_keyboard(uid))
 
-async def disband_clan(callback, user, user_id):
+async def disband_clan(callback, user, uid):
     clan = get_clan(user["clan_id"])
-    if not clan: return
-    if clan["leader_id"] != str(user_id):
-        await callback.message.edit_text("❌ فقط لیدر می‌تواند.", reply_markup=get_keyboard(user_id)); return
+    if not clan or clan["leader_id"] != str(uid): return
     data = load_data()
-    for m in clan["members"]:
-        update_user(int(m), {"clan_id": None})
+    for m in clan["members"]: update_user(int(m), {"clan_id": None})
     del data["clans"][user["clan_id"]]
     save_data(data)
-    await callback.message.edit_text("🗑 کلن منحل شد.", reply_markup=get_keyboard(user_id))
+    await callback.message.edit_text("🗑 منحل شد", reply_markup=get_keyboard(uid))
 
-# ---------- لیگ ----------
-async def show_league_menu(callback, user, user_id):
-    period_num = user.get("current_period", 1)
-    prestige = user.get("prestige", 0)
-    league_name = LEAGUE_FA.get(prestige, "?")
+async def show_league_menu(callback, user, uid):
+    pn = user.get("current_period", 1)
+    lg = LEAGUE_FA.get(user.get("prestige", 0), "?")
     profit = user["coins"] - user.get("period_start_coins", 1)
-    rank = get_user_league_rank(user_id, user)
+    rank = get_user_league_rank(uid, user)
     data = load_data()
-    start_str = data.get("game_start_time")
-    if start_str:
-        start = datetime.fromisoformat(start_str)
-        period_end = start + timedelta(days=period_num)
-        remaining = period_end - datetime.now()
-        if remaining.total_seconds() > 0:
-            h = int(remaining.total_seconds() // 3600)
-            m = int((remaining.total_seconds() % 3600) // 60)
-            remaining_text = f"{h} ساعت و {m} دقیقه"
-        else:
-            remaining_text = "به‌زودی..."
-    else:
-        remaining_text = "?"
-    text = (f"🏅 **لیگ {league_name}** — دوره {period_num}\n\n"
-            f"💵 سود شما در این دوره: {profit:,}\n"
-            f"📊 رتبه شما: {rank}\n"
-            f"⏰ پایان دوره: {remaining_text} دیگر\n\n"
-            f"🏆 ۱۰٪ برتر دوره، افتخار ویژه می‌گیرند!")
+    s = data.get("game_start_time")
+    rt = "?"
+    if s:
+        start = datetime.fromisoformat(s)
+        end = start + timedelta(days=pn)
+        rem = end - datetime.now()
+        if rem.total_seconds() > 0:
+            rt = f"{int(rem.total_seconds()//3600)}h {int((rem.total_seconds()%3600)//60)}m"
+    text = (f"🏅 **لیگ {lg}** — دوره {pn}\n\n💵 سود: {profit:,}\n📊 رتبه: {rank}\n⏰ پایان: {rt}\n\n"
+            f"🏆 ۱۰٪ برتر افتخار می‌گیرن!")
     kb = InlineKeyboardBuilder()
     kb.button("🎖️ افتخارات", callback_data="achievements")
     kb.button("🔙", callback_data="back")
     kb.adjust(1)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
-async def show_achievements(callback, user, user_id):
+async def show_achievements(callback, user, uid):
     achs = user.get("achievements", [])
-    if not achs:
-        text = "🎖️ **افتخارات**\n\nهنوز افتخاری نداری!"
+    if not achs: text = "🎖️ خالی!"
     else:
-        text = f"🎖️ **افتخارات {user['name']}** ({len(achs)} عدد)\n\n"
+        text = f"🎖️ **افتخارات ({len(achs)})**\n\n"
         for a in achs[-20:]:
-            league_name = LEAGUE_FA.get(a.get("league", 0), "?")
+            ln = LEAGUE_FA.get(a.get("league", 0), "?")
             if a["type"] == "top_percent":
-                text += f"🏅 جزو {a['percent']}٪ برتر دوره {a['period']}، لیگ {league_name}\n"
+                text += f"🏅 جزو {a['percent']}٪ برتر دوره {a['period']}، لیگ {ln}\n"
             elif a["type"] == "lone_eagle":
-                text += f"🦅 عقاب تنهای شماره {a['rank']} در دوره {a['period']}، لیگ {league_name}\n"
-    await callback.message.edit_text(text, reply_markup=get_keyboard(user_id))
+                text += f"🦅 عقاب تنهای {a['rank']} دوره {a['period']}، لیگ {ln}\n"
+    await callback.message.edit_text(text, reply_markup=get_keyboard(uid))
 
 # ==================== اجرا ====================
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    print("🤖 ربات فارمینگ بله روشن شد...")
-    
-    async def stop_after_delay():
+    print("🤖 ربات روشن شد...")
+    async def stop_delay():
         await asyncio.sleep(340 * 60)
-        print("⏰ توقف ربات...")
+        print("⏰ توقف...")
         try: await dp.stop_polling()
         except: pass
-    
-    asyncio.create_task(stop_after_delay())
+    asyncio.create_task(stop_delay())
     try:
         await dp.start_polling(bot)
     except Exception as e:
-        print(f"ربات متوقف شد: {e}")
+        print(f"متوقف: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
