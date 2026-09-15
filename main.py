@@ -8,12 +8,12 @@ import sys
 from datetime import datetime, timedelta
 from filelock import FileLock
 
-from baleio import Bot, Dispatcher, md
+from baleio import Bot, Dispatcher, md, F
 from baleio.client.default import DefaultBotProperties
 from baleio.enums import ParseMode
 from baleio.filters import Command, CommandStart
 from baleio.fsm import FSMContext, State, StatesGroup
-from baleio.types import Message, CallbackQuery
+from baleio.types import Message, CallbackQuery, PreCheckoutQuery
 from baleio.utils import InlineKeyboardBuilder
 
 # ==================== تنظیمات ====================
@@ -56,16 +56,20 @@ PRESTIGE_PRICES = {1: 50_000_000_000, 2: 100_000_000_000, 3: 200_000_000_000,
                    7: 1_500_000_000_000, 8: 2_500_000_000_000,
                    9: 5_000_000_000_000, 10: 10_000_000_000_000}
 
+# قیمت‌های فروشگاه سکه
 SHOP_PRICES = {
-    4: {5000: 114000, 10000: 228000, 20000: 456000, 50000: 1140000, 100000: 2280000},
-    5: {5000: 5700000, 10000: 11400000, 20000: 22800000, 50000: 57000000, 100000: 114000000},
-    6: {5000: 342000000, 10000: 684000000, 20000: 1368000000, 50000: 3420000000, 100000: 6840000000},
-    7: {5000: 25650000000, 10000: 51300000000, 20000: 102600000000, 50000: 256500000000, 100000: 513000000000},
+    4: {5000: 114000, 10000: 228000, 20000: 456000, 50000: 1140000, 70000: 1600000, 100000: 2280000},
+    5: {5000: 5700000, 10000: 11400000, 20000: 22800000, 50000: 57000000, 70000: 80000000, 100000: 114000000},
+    6: {5000: 342000000, 10000: 684000000, 20000: 1368000000, 50000: 3420000000, 70000: 4800000000, 100000: 6840000000},
+    7: {5000: 25650000000, 10000: 51300000000, 20000: 102600000000, 50000: 256500000000, 70000: 360000000000, 100000: 513000000000},
 }
 
 SEASON_CYCLE = ["spring", "summer", "autumn", "winter"]
 SEASON_DURATION_MIN = 45
 SEASON_FA = {"spring": "🌸 بهار", "summer": "☀️ تابستان", "autumn": "🍂 پاییز", "winter": "❄️ زمستان"}
+
+# ==================== پت ققنوس (فقط فروشگاه) ====================
+PHOENIX_PET = {"name": "ققنوس", "emoji": "🦅", "type": "sell", "value": 100}
 
 # ==================== تخم‌های پت ====================
 PET_EGGS = {
@@ -143,7 +147,7 @@ def create_default_user(user_id):
     return {
         "name": "", "level": 1, "xp": 0, "coins": 1,
         "state": "idle", "current_fruit": 0, "inventory": [],
-        "harvest_time": None,  # ✅ فیلد جدید: زمان دقیق رسیدن میوه
+        "harvest_time": None,
         "upgrades": {"auto_water": 0, "golden_pot": 0, "professional_seeder": 0},
         "worker": {"level": 1, "active": False},
         "daily_orders": {"date": "", "orders": [], "completed": False},
@@ -151,12 +155,14 @@ def create_default_user(user_id):
         "gifts_given": 0, "gifts_received": 0,
         "referral_code": f"REF{user_id}{random.randint(100,999)}",
         "pet": None,
+        "phoenix_owned": False,  # ✅ مالکیت ققنوس
         "clan_id": None,
         "period_start_coins": 1,
         "period_start_time": now,
         "current_period": 1,
         "last_seen_period": 1,
         "achievements": [],
+        "pending_purchase": None,  # ✅ خرید در انتظار پرداخت
     }
 
 def _ensure_keys(data):
@@ -184,10 +190,13 @@ def _migrate_user(u, game_start_time):
     if "clan_id" not in u:
         u["clan_id"] = None
     if "harvest_time" not in u:
-        # اگه کاربر قبلاً در حال رشد بود، مشکل رو رفع کن
         if u.get("state") == "growing":
-            u["state"] = "harvested"  # فرض کن رسیده (بهترین راه‌حل)
+            u["state"] = "harvested"
         u["harvest_time"] = None
+    if "phoenix_owned" not in u:
+        u["phoenix_owned"] = False
+    if "pending_purchase" not in u:
+        u["pending_purchase"] = None
 
 def load_data():
     with lock:
@@ -270,9 +279,8 @@ def find_user_by_name_or_code(query):
             return uid, u
     return None, None
 
-# ==================== ✅ چک رسیدن میوه (اصلاح باگ ری‌استارت) ====================
+# ==================== چک رسیدن میوه ====================
 def check_harvest(user_id):
-    """چک می‌کنه که آیا زمان رسیدن میوه رسیده یا نه"""
     data = load_data()
     user = data["users"].get(str(user_id))
     if not user:
@@ -295,7 +303,6 @@ def check_harvest(user_id):
     return False
 
 def get_remaining_seconds(user):
-    """بازگرداندن ثانیه‌های باقی‌مانده تا رسیدن میوه"""
     if user.get("state") != "growing":
         return None
     ht_str = user.get("harvest_time")
@@ -594,7 +601,11 @@ def build_status_text(user, user_id):
     
     if "pet" in features:
         pet = user.get("pet")
-        pet_text = f"{pet['emoji']} {pet['name']}" if pet else "ندارد"
+        if pet:
+            type_fa = {"sell": "سود", "speed": "سرعت", "xp": "XP"}
+            pet_text = f"{pet['emoji']} {pet['name']} (+{pet['value']}٪ {type_fa.get(pet['type'], '')})"
+        else:
+            pet_text = "ندارد"
         text += f"🐾 پت: {pet_text}\n"
     
     if "worker" in features:
@@ -616,7 +627,6 @@ def build_status_text(user, user_id):
         text += f"🏅 رتبه لیگ: {rank}\n"
         text += f"🎖️ افتخارات: {len(user.get('achievements', []))}\n"
     
-    # وضعیت رشد
     if user["state"] == "growing":
         rem = get_remaining_seconds(user)
         if rem is not None and rem > 0:
@@ -667,7 +677,6 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    # ✅ چک رسیدن میوه و ریست دوره قبل از هر کار
     check_harvest(user_id)
     check_period_reset(user_id)
     
@@ -861,13 +870,96 @@ async def show_main_menu(message: Message):
     )
     await message.answer(text, reply_markup=get_keyboard(user_id))
 
+# ==================== ✅ پرداخت ====================
+@dp.pre_checkout_query()
+async def on_pre_checkout(query: PreCheckoutQuery):
+    """تأیید اولیه‌ی پرداخت"""
+    try:
+        await query.answer(ok=True)
+    except Exception as e:
+        print(f"خطا در pre_checkout: {e}")
+
+@dp.message(F.successful_payment)
+async def on_successful_payment(message: Message):
+    """پرداخت موفق - اضافه کردن سکه به کاربر"""
+    sp = message.successful_payment
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        return
+    
+    payload = sp.invoice_payload  # مثلاً "shop_50000_1140000" یا "shop_70000_phoenix"
+    parts = payload.split("_")
+    
+    try:
+        amount = int(parts[1])
+    except:
+        return
+    
+    gift_msg = ""
+    inv = user.get("inventory", [])
+    
+    if len(parts) >= 4 and parts[3] == "phoenix":
+        # بسته‌ی ققنوس
+        coins = int(parts[2])
+        new_coins = user["coins"] + coins
+        update_user(user_id, {
+            "coins": new_coins,
+            "pet": PHOENIX_PET,
+            "phoenix_owned": True,
+            "pending_purchase": None
+        })
+        update_leaderboard(user_id, user["name"], new_coins, user["level"], user["prestige"])
+        gift_msg = f"\n🦅 **پت ققنوس** به شما داده شد! (+۱۰۰٪ سود)"
+        await message.answer(
+            f"✅ **پرداخت موفق!**\n\n"
+            f"💰 مبلغ: {amount:,} تومان\n"
+            f"🪙 سکه دریافتی: {coins:,}\n"
+            f"💼 موجودی جدید: {new_coins:,}{gift_msg}\n\n"
+            f"⚠️ از این پس نمی‌توانید اسپین کنید (ققنوس دائمی است).",
+            reply_markup=get_keyboard(user_id)
+        )
+        return
+    
+    # بسته‌های عادی
+    try:
+        coins = int(parts[2])
+    except:
+        return
+    
+    new_coins = user["coins"] + coins
+    
+    if amount == 50000:
+        avail = get_available_fruits(user)
+        fi = random.choice(avail)
+        inv.append(FRUITS[fi])
+        gift_msg = f"\n🎁 بذر {FRUITS[fi]} به انبار اضافه شد."
+    elif amount == 100000:
+        fi = random.randint(0, len(FRUITS)-1)
+        inv.append(f"طلایی_{FRUITS[fi]}")
+        gift_msg = f"\n✨ بذر طلایی {FRUITS[fi]} به انبار اضافه شد."
+    
+    update_user(user_id, {
+        "coins": new_coins,
+        "inventory": inv,
+        "pending_purchase": None
+    })
+    update_leaderboard(user_id, user["name"], new_coins, user["level"], user["prestige"])
+    
+    await message.answer(
+        f"✅ **پرداخت موفق!**\n\n"
+        f"💰 مبلغ: {amount:,} تومان\n"
+        f"🪙 سکه دریافتی: {coins:,}\n"
+        f"💼 موجودی جدید: {new_coins:,}{gift_msg}",
+        reply_markup=get_keyboard(user_id)
+    )
+
 # ==================== کال‌بک‌ها ====================
 @dp.callback_query()
 async def on_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     user_id = callback.from_user.id
     
-    # ✅ چک رسیدن میوه و ریست دوره
     check_harvest(user_id)
     check_period_reset(user_id)
     
@@ -953,7 +1045,6 @@ async def switch_fruit(callback, user, user_id, idx):
     update_user(user_id, {"current_fruit": idx})
     await callback.message.edit_text(f"✅ میوه فعلی: {FRUITS[idx]}", reply_markup=get_keyboard(user_id))
 
-# ==================== ✅ خرید بذر (اصلاح‌شده بدون asyncio.sleep) ====================
 async def buy_seed(callback, user, user_id):
     cf = user["current_fruit"]
     effects, _ = get_season_effects()
@@ -973,7 +1064,6 @@ async def buy_seed(callback, user, user_id):
     if speed_bonus > 0:
         growth_time *= (1 - speed_bonus / 100)
     
-    # ✅ ذخیره‌ی زمان دقیق رسیدن توی data.json (نه توی حافظه)
     harvest_dt = datetime.now() + timedelta(minutes=growth_time)
     
     update_user(user_id, {
@@ -989,7 +1079,6 @@ async def buy_seed(callback, user, user_id):
         reply_markup=get_keyboard(user_id)
     )
 
-# ==================== ✅ فروش (اصلاح‌شده) ====================
 async def sell_fruit(callback, user, user_id):
     if user["state"] != "harvested":
         await callback.message.edit_text("⏳ هنوز نرسیده!", reply_markup=get_keyboard(user_id)); return
@@ -1121,6 +1210,7 @@ async def complete_orders(callback, user, user_id):
     update_leaderboard(user_id, user["name"], new_coins, user["level"], user["prestige"])
     await callback.message.edit_text(f"✅ +{bonus:,} سکه", reply_markup=get_keyboard(user_id))
 
+# ==================== ✅ فروشگاه (نمایش + ارسال فاکتور) ====================
 async def show_shop(callback, user, user_id):
     level = user["level"]
     if level < 4 and user.get("prestige", 0) == 0:
@@ -1130,13 +1220,20 @@ async def show_shop(callback, user, user_id):
     for amt, c in prices.items():
         text += f"• {amt:,} تومان → {c:,} سکه"
         if amt == 50000: text += " + بذر معمولی"
+        elif amt == 70000: text += " + 🦅 ققنوس"
         elif amt == 100000: text += " + بذر طلایی ✨"
         text += "\n"
+    
+    if user.get("phoenix_owned"):
+        text += "\n⚠️ شما صاحب ققنوس هستید و ققنوس دائمی است."
+    
     kb = InlineKeyboardBuilder()
     kb.button("۵,۰۰۰", callback_data="shop_5000")
     kb.button("۱۰,۰۰۰", callback_data="shop_10000")
     kb.button("۲۰,۰۰۰", callback_data="shop_20000")
     kb.button("۵۰,۰۰۰", callback_data="shop_50000")
+    if not user.get("phoenix_owned"):
+        kb.button("۷۰,۰۰۰ 🦅", callback_data="shop_70000")
     kb.button("۱۰۰,۰۰۰ ✨", callback_data="shop_100000")
     kb.button("🔙", callback_data="back")
     kb.adjust(2, 2, 1, 1)
@@ -1145,20 +1242,55 @@ async def show_shop(callback, user, user_id):
 async def buy_shop(callback, user, user_id, amount):
     level = user["level"] if user.get("prestige", 0) == 0 else 7
     prices = SHOP_PRICES.get(level, SHOP_PRICES[7])
-    if amount not in prices: return
+    if amount not in prices:
+        return
+    
     coins = prices[amount]
-    inv = user.get("inventory", [])
-    gm = ""
-    if amount == 50000:
-        fi = random.choice(get_available_fruits(user))
-        inv.append(FRUITS[fi]); gm = f"\n🎁 بذر {FRUITS[fi]}"
-    elif amount == 100000:
-        fi = random.randint(0, len(FRUITS)-1)
-        inv.append(f"طلایی_{FRUITS[fi]}"); gm = f"\n✨ بذر طلایی {FRUITS[fi]}"
-    new_coins = user["coins"] + coins
-    update_user(user_id, {"coins": new_coins, "inventory": inv})
-    update_leaderboard(user_id, user["name"], new_coins, user["level"], user["prestige"])
-    await callback.message.edit_text(f"✅ +{coins:,} سکه\nموجودی: {new_coins:,}{gm}", reply_markup=get_keyboard(user_id))
+    price_in_rials = amount * 10  # تومان → ریال
+    
+    # ذخیره‌ی خرید در انتظار
+    update_user(user_id, {
+        "pending_purchase": {
+            "amount": amount,
+            "coins": coins,
+            "created_at": datetime.now().isoformat()
+        }
+    })
+    
+    # تعیین payload
+    if amount == 70000:
+        payload = f"shop_{amount}_{coins}_phoenix"
+        title = "خرید ققنوس + سکه"
+        desc = f"بسته‌ی ویژه: {coins:,} سکه + پت ققنوس 🦅"
+    else:
+        payload = f"shop_{amount}_{coins}"
+        title = f"خرید {coins:,} سکه"
+        desc = f"بسته‌ی {amount:,} تومانی فارمینگ"
+    
+    try:
+        await bot.send_invoice(
+            chat_id=user_id,
+            title=title,
+            description=desc,
+            payload=payload,
+            provider_token=PROVIDER_TOKEN,
+            currency="IRR",
+            prices=[
+                {"label": f"{coins:,} سکه" + (" + ققنوس" if amount == 70000 else ""),
+                 "amount": price_in_rials}
+            ],
+        )
+        # پیام قبلی رو پاک کن (اختیاری)
+        try:
+            await callback.message.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        await callback.message.edit_text(
+            f"❌ خطا در ارسال فاکتور!\n\n`{str(e)[:250]}`\n\n"
+            f"اگه توکن پرداخت تنظیم نشده، با @BotFather بله تماس بگیر.",
+            reply_markup=get_keyboard(user_id)
+        )
 
 async def show_worker(callback, user, user_id):
     w = user["worker"]; cost = 5000 * w["level"]
@@ -1196,7 +1328,7 @@ async def show_prestige(callback, user, user_id):
     price = PRESTIGE_PRICES[nxt]
     text = (f"⭐ **پرستیژ {nxt}**\nهزینه: {price:,}\n"
             f"ضریب جدید: {user['prestige_multiplier']*1.5:.2f}x\n\n"
-            f"⚠️ همه چیز ریست می‌شود (به‌جز نام، پرستیژ و کلن)")
+            f"⚠️ همه چیز ریست می‌شود (به‌جز نام، پرستیژ، کلن و ققنوس)")
     kb = InlineKeyboardBuilder()
     kb.button(f"⭐ خرید ({price:,})", callback_data="buy_prestige")
     kb.button("🔙", callback_data="back")
@@ -1218,6 +1350,9 @@ async def buy_prestige(callback, user, user_id):
     new_user["gifts_received"] = user.get("gifts_received", 0)
     new_user["achievements"] = user.get("achievements", [])
     new_user["clan_id"] = user.get("clan_id")
+    new_user["phoenix_owned"] = user.get("phoenix_owned", False)  # ✅ ققنوس حفظ می‌شه
+    if new_user["phoenix_owned"]:
+        new_user["pet"] = PHOENIX_PET  # ✅ پت ققنوس هم حفظ می‌شه
     new_user["last_seen_period"] = get_period_number()
     new_user["current_period"] = get_period_number()
     data = load_data()
@@ -1231,8 +1366,23 @@ async def buy_prestige(callback, user, user_id):
 # ---------- پت ----------
 async def show_pet_menu(callback, user, user_id):
     pet = user.get("pet")
-    pet_text = f"{pet['emoji']} {pet['name']} ({pet['value']}% {'سود' if pet['type']=='sell' else 'سرعت' if pet['type']=='speed' else 'XP'})" if pet else "ندارد"
-    text = f"🐾 **پت شما:** {pet_text}\n\n🥚 **تخم‌ها:**\n"
+    if pet:
+        type_fa = {"sell": "سود", "speed": "سرعت", "xp": "XP"}
+        pet_text = f"{pet['emoji']} {pet['name']} (+{pet['value']}٪ {type_fa.get(pet['type'], '')})"
+    else:
+        pet_text = "ندارد"
+    
+    text = f"🐾 **پت شما:** {pet_text}\n\n"
+    
+    if user.get("phoenix_owned"):
+        text += "⚠️ شما صاحب **ققنوس** هستید. امکان اسپین وجود ندارد.\n"
+        text += "ققنوس دائمی است و با پرستیژ هم از بین نمی‌رود."
+        kb = InlineKeyboardBuilder()
+        kb.button("🔙", callback_data="back")
+        await callback.message.edit_text(text, reply_markup=kb.as_markup())
+        return
+    
+    text += "🥚 **تخم‌ها:**\n"
     for k, egg in PET_EGGS.items():
         text += f"• {egg['name']}: {egg['price']:,} سکه\n"
     text += "\n⚠️ با هر اسپین، پت فعلی از بین می‌رود!"
@@ -1246,6 +1396,15 @@ async def show_pet_menu(callback, user, user_id):
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
 async def do_spin(callback, user, user_id, egg_type):
+    # ✅ قفل اسپین اگه ققنوس داره
+    if user.get("phoenix_owned"):
+        await callback.message.edit_text(
+            "🦅 شما صاحب **ققنوس** هستید و امکان اسپین ندارید.\n"
+            "ققنوس دائمی است و از بین نمی‌رود.",
+            reply_markup=get_keyboard(user_id)
+        )
+        return
+    
     if egg_type not in PET_EGGS: return
     egg = PET_EGGS[egg_type]
     if user["coins"] < egg["price"]:
