@@ -17,7 +17,7 @@ from baleio.types import Message, CallbackQuery
 from baleio.utils import InlineKeyboardBuilder
 
 # ==================== تنظیمات ====================
-TOKEN = os.getenv("BOT_TOKEN", "1256580489:2CcrEtsKwjKFnuBajGRSMG-dx6BeJiujhr0")
+TOKEN = os.getenv("BOT_TOKEN", "")
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "WALLET-TEST-1111111111111111")
 DATA_FILE = "data.json"
 BACKUP_FILE = "data_backup.json"
@@ -33,7 +33,7 @@ PRICES = [
 GROWTH_TIMES = [1, 2.5, 4, 5.5, 7, 8.5, 10]
 
 # ==================== XP و لول ====================
-XP_REQUIRED = {1: 5, 2: 5, 3: 30, 4: 75, 5: 250, 6: 1000}
+XP_REQUIRED = {1: 5, 2: 30, 3: 75, 4: 250, 5: 1000, 6: 5000}
 XP_FROM_SALES = {
     "توت‌فرنگی": (1, 1), "گوجه": (2, 3), "سیب": (4, 6),
     "پرتقال": (8, 12), "نارگیل": (20, 30), "آناناس": (35, 65)
@@ -230,7 +230,7 @@ def find_user_by_name_or_code(query):
             return uid, u
     return None, None
 
-# ==================== کیبورد ====================
+# ==================== کیبورد (بدون قیمت در دکمه‌ها) ====================
 def get_keyboard(user_id):
     user = get_user(user_id)
     if not user:
@@ -241,11 +241,7 @@ def get_keyboard(user_id):
         cf = get_available_fruits(user)[0]
         update_user(user_id, {"current_fruit": cf})
     
-    effects, _ = get_season_effects()
-    multiplier = user["prestige_multiplier"]
     fruit = FRUITS[cf]
-    buy_price = int(PRICES[cf][0] * multiplier * effects["buy_mult"])
-    sell_price = int(PRICES[cf][1] * multiplier * effects["sell_mult"])
     
     kb = InlineKeyboardBuilder()
     
@@ -254,13 +250,10 @@ def get_keyboard(user_id):
         kb.button("⏳ هنوز نرسیده!", callback_data="noop")
     elif user["state"] == "harvested":
         kb.button("🌱 بذر قبلاً کاشته شده", callback_data="noop")
-        kb.button(f"💰 فروش {fruit} ({sell_price:,})", callback_data="sell")
-    elif user["coins"] < buy_price:
-        kb.button(f"❌ سکه ناکافی (نیاز {buy_price:,})", callback_data="noop")
-        kb.button(f"💰 فروش {fruit} ({sell_price:,})", callback_data="sell")
+        kb.button(f"💰 فروش {fruit}", callback_data="sell")
     else:
-        kb.button(f"🌱 خرید بذر {fruit} ({buy_price:,})", callback_data="buy")
-        kb.button(f"💰 فروش {fruit} ({sell_price:,})", callback_data="sell")
+        kb.button(f"🌱 خرید بذر {fruit}", callback_data="buy")
+        kb.button(f"💰 فروش {fruit}", callback_data="sell")
     
     kb.adjust(2)
     
@@ -290,6 +283,34 @@ def get_keyboard(user_id):
     
     kb.adjust(2)
     return kb.as_markup()
+
+# ==================== متن وضعیت ====================
+def build_status_text(user):
+    """ساخت متن وضعیت با لیست قیمت میوه‌های قابل‌دسترس"""
+    effects, season = get_season_effects()
+    multiplier = user["prestige_multiplier"]
+    
+    text = (
+        f"📊 **وضعیت {user['name']}:**\n"
+        f"💰 سکه: {user['coins']:,}\n"
+        f"📈 لول: {user['level']} | XP: {user['xp']}/{xp_needed_for(user['level'])}\n"
+        f"⭐ پرستیژ: {user['prestige']} | ضریب: {user['prestige_multiplier']:.2f}x\n"
+        f"🌤 فصل: {SEASON_FA[season]}\n"
+        f"🌱 میوه فعلی: {FRUITS[user['current_fruit']]}\n"
+        f"⏳ وضعیت: {user['state']}\n"
+        f"🎁 هدیه داده: {user.get('gifts_given', 0)} | گرفته: {user.get('gifts_received', 0)}\n"
+        f"👷 کارگر: لول {user['worker']['level']} ({'فعال' if user['worker']['active'] else 'غیرفعال'})\n\n"
+        f"🍎 **قیمت میوه‌های قابل‌دسترس:**\n"
+    )
+    
+    available = get_available_fruits(user)
+    for i in available:
+        buy_price = int(PRICES[i][0] * multiplier * effects["buy_mult"])
+        sell_price = int(PRICES[i][1] * multiplier * effects["sell_mult"])
+        mark = "✅ " if i == user["current_fruit"] else ""
+        text += f"{mark}{FRUITS[i]}: خرید {buy_price:,} | فروش {sell_price:,}\n"
+    
+    return text
 
 # ==================== راه‌اندازی ====================
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
@@ -404,19 +425,7 @@ async def show_status(message: Message):
     user = get_user(user_id)
     if not user:
         return
-    _, season = get_season_effects()
-    text = (
-        f"📊 **وضعیت {user['name']}:**\n"
-        f"💰 سکه: {user['coins']:,}\n"
-        f"📈 لول: {user['level']} | XP: {user['xp']}/{xp_needed_for(user['level'])}\n"
-        f"⭐ پرستیژ: {user['prestige']} | ضریب: {user['prestige_multiplier']:.2f}x\n"
-        f"🌤 فصل: {SEASON_FA[season]}\n"
-        f"🌱 میوه: {FRUITS[user['current_fruit']]}\n"
-        f"⏳ وضعیت: {user['state']}\n"
-        f"🎁 هدیه داده: {user.get('gifts_given', 0)} | گرفته: {user.get('gifts_received', 0)}\n"
-        f"👷 کارگر: لول {user['worker']['level']} ({'فعال' if user['worker']['active'] else 'غیرفعال'})"
-    )
-    await message.answer(text, reply_markup=get_keyboard(user_id))
+    await message.answer(build_status_text(user), reply_markup=get_keyboard(user_id))
 
 # ==================== کال‌بک‌ها ====================
 @dp.callback_query()
@@ -469,16 +478,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
 
 async def edit_status(callback: CallbackQuery, user):
     user_id = callback.from_user.id
-    _, season = get_season_effects()
-    text = (
-        f"📊 **وضعیت {user['name']}:**\n"
-        f"💰 سکه: {user['coins']:,}\n"
-        f"📈 لول: {user['level']} | XP: {user['xp']}/{xp_needed_for(user['level'])}\n"
-        f"⭐ پرستیژ: {user['prestige']}\n"
-        f"🌤 فصل: {SEASON_FA[season]}\n"
-        f"🌱 میوه: {FRUITS[user['current_fruit']]}\n"
-    )
-    await callback.message.edit_text(text, reply_markup=get_keyboard(user_id))
+    await callback.message.edit_text(build_status_text(user), reply_markup=get_keyboard(user_id))
 
 async def switch_fruit(callback: CallbackQuery, user, fruit_idx):
     user_id = callback.from_user.id
@@ -504,7 +504,10 @@ async def buy_seed(callback: CallbackQuery, user, bot):
         await callback.message.edit_text("🌱 اول بفروش بعد بخر.", reply_markup=get_keyboard(user_id))
         return
     if user["coins"] < buy_price:
-        await callback.message.edit_text(f"❌ نیاز به {buy_price:,} سکه.", reply_markup=get_keyboard(user_id))
+        await callback.message.edit_text(
+            f"❌ سکه کافی نیست!\n💰 موجودی: {user['coins']:,}\n💵 نیاز: {buy_price:,}",
+            reply_markup=get_keyboard(user_id)
+        )
         return
     
     growth_time = GROWTH_TIMES[cf] * effects["growth_mult"]
@@ -536,7 +539,10 @@ async def sell_fruit(callback: CallbackQuery, user):
     
     cf = user["current_fruit"]
     effects, _ = get_season_effects()
-    sell_price = int(PRICES[cf][1] * user["prestige_multiplier"] * effects["sell_mult"])
+    
+    # قیمت پایه فروش (بدون طلایی و گلدان)
+    base_sell = int(PRICES[cf][1] * user["prestige_multiplier"] * effects["sell_mult"])
+    sell_price = base_sell
     
     golden = random.random() < effects["golden_chance"]
     if golden:
@@ -566,7 +572,8 @@ async def sell_fruit(callback: CallbackQuery, user):
     golden_text = " ✨(طلایی!)" if golden else ""
     await callback.message.edit_text(
         f"✅ {fruit_name} فروخته شد{golden_text}\n"
-        f"💰 +{sell_price:,} سکه\n"
+        f"💵 قیمت فروش: {base_sell:,} سکه\n"
+        f"💰 دریافت نهایی: +{sell_price:,} سکه\n"
         f"⭐ +{xp_gain} XP\n"
         f"📈 لول {new_level} (XP: {new_xp}/{xp_needed_for(new_level)}){level_up_msg}",
         reply_markup=get_keyboard(user_id)
@@ -821,9 +828,9 @@ async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     print("🤖 ربات فارمینگ بله روشن شد...")
     
-    # توقف خودکار بعد از ۴ دقیقه تا اجرای بعدی بدون تداخل شروع شود
+    # توقف خودکار بعد از ۵ ساعت و ۴۰ دقیقه
     async def stop_after_delay():
-        await asyncio.sleep(340 * 60)  # ۳۴۰ دقیقه = ۵ ساعت و ۴۰ دقیقه
+        await asyncio.sleep(340 * 60)
         print("⏰ زمان اجرا تمام شد. توقف ربات...")
         try:
             await dp.stop_polling()
