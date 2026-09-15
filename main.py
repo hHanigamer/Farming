@@ -93,11 +93,26 @@ def create_default_user(user_id):
         "referral_code": f"REF{user_id}{random.randint(100,999)}",
     }
 
+def _ensure_keys(data):
+    """اطمینان از وجود کلیدهای ضروری در داده"""
+    if not isinstance(data, dict):
+        return create_default_data()
+    if "users" not in data:
+        data["users"] = {}
+    if "leaderboard" not in data:
+        data["leaderboard"] = []
+    if "game_start_time" not in data:
+        data["game_start_time"] = datetime.now().isoformat()
+    return data
+
 def load_data():
     with lock:
         if not os.path.exists(DATA_FILE):
             if os.path.exists(BACKUP_FILE):
-                shutil.copy(BACKUP_FILE, DATA_FILE)
+                try:
+                    shutil.copy(BACKUP_FILE, DATA_FILE)
+                except Exception:
+                    pass
             else:
                 default = create_default_data()
                 with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -105,12 +120,16 @@ def load_data():
                 return default
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            return _ensure_keys(data)
         except Exception:
             if os.path.exists(BACKUP_FILE):
-                shutil.copy(BACKUP_FILE, DATA_FILE)
-                with open(DATA_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                try:
+                    with open(BACKUP_FILE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    return _ensure_keys(data)
+                except Exception:
+                    pass
             default = create_default_data()
             with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(default, f, ensure_ascii=False, indent=2)
@@ -118,6 +137,7 @@ def load_data():
 
 def save_data(data):
     with lock:
+        data = _ensure_keys(data)
         temp_file = DATA_FILE + ".tmp"
         try:
             with open(temp_file, "w", encoding="utf-8") as f:
