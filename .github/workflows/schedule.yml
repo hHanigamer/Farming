@@ -1,0 +1,49 @@
+name: Bale Farming Bot
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # هر ۱۰ دقیقه یک بار
+  workflow_dispatch:        # امکان اجرای دستی
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350    # کمی کمتر از ۶ ساعت برای جلوگیری از قطع ناگهانی
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      # ۱. دانلود فایل داده از اجرای قبلی
+      - name: Download data
+        uses: actions/download-artifact@v4
+        with:
+          name: game-data
+          path: .
+        continue-on-error: true  # اگر فایل نبود، خطا نده
+
+      # ۲. اجرای ربات
+      - name: Run bot
+        run: python main.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          PROVIDER_TOKEN: ${{ secrets.PROVIDER_TOKEN }}
+
+      # ۳. آپلود فایل داده برای اجرای بعدی
+      - name: Upload data
+        uses: actions/upload-artifact@v4
+        if: always()  # حتی اگر ربات کرش کرد، فایل را آپلود کن
+        with:
+          name: game-data
+          path: |
+            data.json
+            data_backup.json
+          retention-days: 7  # فایل را ۷ روز نگه دار
