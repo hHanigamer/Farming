@@ -2,13 +2,17 @@ name: Bale Farming Bot
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/15 * * * *'   # هر ۱۵ دقیقه
   workflow_dispatch:
+
+concurrency:
+  group: bale-farming-bot
+  cancel-in-progress: false   # اجرای در حال اجرا را کنسل نکن، اجرای جدید منتظر بماند
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 10
     permissions:
       contents: write
 
@@ -27,8 +31,8 @@ jobs:
       - name: Fetch data from data-storage branch
         run: |
           git fetch origin data-storage || echo "شاخه داده وجود ندارد"
-          git checkout origin/data-storage -- data.json 2>/dev/null || echo "فایل داده یافت نشد"
-          git checkout origin/data-storage -- data_backup.json 2>/dev/null || echo "فایل پشتیبان یافت نشد"
+          git checkout origin/data-storage -- data.json 2>/dev/null || echo "data.json یافت نشد"
+          git checkout origin/data-storage -- data_backup.json 2>/dev/null || echo "data_backup.json یافت نشد"
 
       - name: Run bot
         run: python main.py
@@ -42,12 +46,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # ذخیره در یک شاخه موقت
+          # پاک کردن فایل‌های غیرضروری از staging
           git checkout -B data-storage-temp
-          
-          # پاک کردن فایل‌های اضافی
           git rm -rf . --cached > /dev/null 2>&1 || true
-          find . -maxdepth 1 -type f ! -name 'data.json' ! -name 'data_backup.json' -exec git rm --cached {} \; > /dev/null 2>&1 || true
           
           # اضافه کردن فقط فایل‌های داده
           if [ -f data.json ]; then git add -f data.json; fi
