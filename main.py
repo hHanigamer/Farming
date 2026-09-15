@@ -21,7 +21,11 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("BOT_TOKEN not set!")
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "WALLET-TEST-1111111111111111")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
+# ✅ پشتیبانی از چند ادمین (با کاما جدا می‌شن)
+ADMIN_IDS_STR = os.getenv("ADMIN_ID", "0")
+ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip().isdigit()]
+
 DATA_FILE = "data.json"
 BACKUP_FILE = "data_backup.json"
 LOCK_FILE = "data.lock"
@@ -142,7 +146,7 @@ TEXT_COMMANDS = {
 }
 
 def is_admin(user_id):
-    return ADMIN_ID != 0 and int(user_id) == ADMIN_ID
+    return int(user_id) in ADMIN_IDS and len(ADMIN_IDS) > 0
 
 class UserForm(StatesGroup):
     name = State()
@@ -158,7 +162,6 @@ class UserForm(StatesGroup):
 
 # ==================== توابع کمکی زمان ====================
 def format_time_remaining(rem_seconds):
-    """فرمت‌بندی زمان باقی‌مونده به فارسی"""
     if rem_seconds < 0:
         rem_seconds = 0
     h = int(rem_seconds // 3600)
@@ -1523,31 +1526,51 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     elif data == "admin_panel": await show_admin_panel(callback, uid)
     elif data == "lands_menu": await show_lands_menu(callback, user, uid)
     elif data == "inventory_menu": await show_inventory(callback, user, uid)
+    # ✅ buy_land باید قبل از buy_ چک بشه
+    elif data == "buy_land": await buy_land(callback, user, uid)
     elif data.startswith("buy_"):
-        await buy_seed_for_plot(callback, user, uid, int(data.split("_")[1]))
+        try:
+            idx = int(data.split("_")[1])
+        except ValueError:
+            return
+        await buy_seed_for_plot(callback, user, uid, idx)
     elif data.startswith("harvest_"):
-        await harvest_plot(callback, user, uid, int(data.split("_")[1]))
+        try:
+            idx = int(data.split("_")[1])
+        except ValueError:
+            return
+        await harvest_plot(callback, user, uid, idx)
     elif data.startswith("sell_inv_"):
         await sell_from_inventory(callback, user, uid, data.replace("sell_inv_", ""))
     elif data.startswith("plant_plot_"):
-        p = data.split("_"); await plant_in_plot(callback, user, uid, int(p[2]), int(p[3]))
+        p = data.split("_")
+        try:
+            pidx = int(p[2]); fidx = int(p[3])
+        except (ValueError, IndexError):
+            return
+        await plant_in_plot(callback, user, uid, pidx, fidx)
     elif data.startswith("switch_"):
-        await switch_fruit(callback, user, uid, int(data.split("_")[1]))
+        try: idx = int(data.split("_")[1])
+        except ValueError: return
+        await switch_fruit(callback, user, uid, idx)
     elif data == "leaderboard": await show_leaderboard(callback, user, uid)
     elif data == "upgrades": await show_upgrades(callback, user, uid)
     elif data.startswith("upgrade_"): await buy_upgrade(callback, user, uid, data.replace("upgrade_", ""))
-    elif data == "buy_land": await buy_land(callback, user, uid)
     elif data == "daily_orders": await show_daily_orders(callback, user, uid)
     elif data == "complete_orders": await complete_orders(callback, user, uid)
     elif data == "shop": await show_shop(callback, user, uid)
-    elif data.startswith("shop_"): await buy_shop(callback, user, uid, int(data.split("_")[1]))
+    elif data.startswith("shop_"):
+        try: amt = int(data.split("_")[1])
+        except ValueError: return
+        await buy_shop(callback, user, uid, amt)
     elif data == "worker_menu": await show_worker(callback, user, uid)
     elif data == "hire_planting": await start_hire_planting(callback, user, uid)
     elif data == "hire_harvest":
         await state.set_state(UserForm.worker_harvest_hours)
         await start_hire_harvest(callback, user, uid)
     elif data.startswith("wp_fruit_"):
-        fruit_idx = int(data.replace("wp_fruit_", ""))
+        try: fruit_idx = int(data.replace("wp_fruit_", ""))
+        except ValueError: return
         if fruit_idx not in get_available_fruits(user):
             await callback.message.edit_text("❌", reply_markup=get_keyboard(uid)); return
         await state.update_data(wp_fruit=fruit_idx)
@@ -1783,7 +1806,6 @@ async def show_leaderboard(callback, user, uid):
     if not lb: text += "خالیه!"
     await callback.message.edit_text(text, reply_markup=get_keyboard(uid))
 
-# ==================== ارتقاءها (اصلاح‌شده با اسم) ====================
 async def show_upgrades(callback, user, uid):
     u = user["upgrades"]
     c1 = 1000*(u.get("auto_water",0)+1)
@@ -1929,7 +1951,7 @@ async def buy_shop(callback, user, uid, amount):
         except: pass
     except Exception as e: await callback.message.edit_text(f"❌ `{str(e)[:200]}`", reply_markup=get_keyboard(uid))
 
-# ==================== کارگرها UI (اصلاح‌شده) ====================
+# ==================== کارگرها UI ====================
 async def show_worker(callback, user, uid):
     workers = user.get("workers", {})
     pw = workers.get("planting", {})
@@ -2158,7 +2180,7 @@ async def show_achievements(callback, user, uid):
 # ==================== MAIN ====================
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
-    print(f"🤖 Bot started... Admin ID: {ADMIN_ID}")
+    print(f"🤖 Bot started... Admin IDs: {ADMIN_IDS}")
     async def stop_delay():
         await asyncio.sleep(340 * 60)
         print("⏰ Stopping...")
