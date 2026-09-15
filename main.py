@@ -17,7 +17,7 @@ from baleio.types import Message, CallbackQuery
 from baleio.utils import InlineKeyboardBuilder
 
 # ==================== تنظیمات ====================
-TOKEN = os.getenv("BOT_TOKEN", "1256580489:2CcrEtsKwjKFnuBajGRSMG-dx6BeJiujhr0")
+TOKEN = os.getenv("BOT_TOKEN", "1105331545:F2VVqxx-upUwuDP-pzaslw1dlgh6dq_o5IQ")
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "WALLET-TEST-1111111111111111")
 DATA_FILE = "data.json"
 BACKUP_FILE = "data_backup.json"
