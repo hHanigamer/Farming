@@ -143,6 +143,7 @@ def create_default_user(user_id):
     return {
         "name": "", "level": 1, "xp": 0, "coins": 1,
         "state": "idle", "current_fruit": 0, "inventory": [],
+        "harvest_time": None,  # ✅ فیلد جدید: زمان دقیق رسیدن میوه
         "upgrades": {"auto_water": 0, "golden_pot": 0, "professional_seeder": 0},
         "worker": {"level": 1, "active": False},
         "daily_orders": {"date": "", "orders": [], "completed": False},
@@ -182,6 +183,11 @@ def _migrate_user(u, game_start_time):
         u["pet"] = None
     if "clan_id" not in u:
         u["clan_id"] = None
+    if "harvest_time" not in u:
+        # اگه کاربر قبلاً در حال رشد بود، مشکل رو رفع کن
+        if u.get("state") == "growing":
+            u["state"] = "harvested"  # فرض کن رسیده (بهترین راه‌حل)
+        u["harvest_time"] = None
 
 def load_data():
     with lock:
@@ -263,6 +269,46 @@ def find_user_by_name_or_code(query):
         if u.get("referral_code", "").lower() == q:
             return uid, u
     return None, None
+
+# ==================== ✅ چک رسیدن میوه (اصلاح باگ ری‌استارت) ====================
+def check_harvest(user_id):
+    """چک می‌کنه که آیا زمان رسیدن میوه رسیده یا نه"""
+    data = load_data()
+    user = data["users"].get(str(user_id))
+    if not user:
+        return False
+    if user.get("state") != "growing":
+        return False
+    harvest_time = user.get("harvest_time")
+    if not harvest_time:
+        return False
+    try:
+        ht = datetime.fromisoformat(harvest_time)
+    except Exception:
+        return False
+    if datetime.now() >= ht:
+        user["state"] = "harvested"
+        user["harvest_time"] = None
+        data["users"][str(user_id)] = user
+        save_data(data)
+        return True
+    return False
+
+def get_remaining_seconds(user):
+    """بازگرداندن ثانیه‌های باقی‌مانده تا رسیدن میوه"""
+    if user.get("state") != "growing":
+        return None
+    ht_str = user.get("harvest_time")
+    if not ht_str:
+        return None
+    try:
+        ht = datetime.fromisoformat(ht_str)
+        remaining = (ht - datetime.now()).total_seconds()
+        if remaining <= 0:
+            return 0
+        return int(remaining)
+    except Exception:
+        return None
 
 # ==================== فصل ====================
 def get_current_season():
@@ -440,13 +486,11 @@ def update_league_profit(user_id, user, profit):
 
 # ==================== توابع کمکی ====================
 def get_available_fruits(user):
-    # ✅ اگه پرستیژ بالای ۰ داره، همه‌ی میوه‌ها بازه
     if user.get("prestige", 0) > 0:
         return ALL_FRUITS
     return LEVEL_UNLOCKS.get(user["level"], LEVEL_UNLOCKS[7])["fruits"]
 
 def get_available_features(user):
-    # ✅ اگه پرستیژ بالای ۰ داره، همه‌ی ویژگی‌ها بازه
     if user.get("prestige", 0) > 0:
         return ALL_FEATURES
     return LEVEL_UNLOCKS.get(user["level"], LEVEL_UNLOCKS[7])["features"]
@@ -475,7 +519,13 @@ def get_keyboard(user_id):
     kb = InlineKeyboardBuilder()
     
     if user["state"] == "growing":
-        kb.button("⏳ در حال رشد...", callback_data="noop")
+        rem = get_remaining_seconds(user)
+        if rem is not None and rem > 0:
+            mins = rem // 60
+            secs = rem % 60
+            kb.button(f"⏳ در حال رشد ({mins}:{secs:02d})", callback_data="noop")
+        else:
+            kb.button("⏳ در حال رشد...", callback_data="noop")
         kb.button("⏳ هنوز نرسیده!", callback_data="noop")
     elif user["state"] == "harvested":
         kb.button("🌱 بذر قبلاً کاشته شده", callback_data="noop")
@@ -529,7 +579,6 @@ def build_status_text(user, user_id):
     profit = user["coins"] - user.get("period_start_coins", 1)
     period_num = user.get("current_period", 1)
     
-    # --- بخش اصلی ---
     text = (
         f"📊 **وضعیت {user['name']}:**\n"
         f"💰 سکه: {user['coins']:,}\n"
@@ -537,25 +586,20 @@ def build_status_text(user, user_id):
         f"🌤 فصل: {SEASON_FA[season]}\n"
     )
     
-    # --- پرستیژ (فقط از لول ۷ یا پرستیژ ۱+) ---
     if "prestige" in features:
         text += f"⭐ پرستیژ: {user['prestige']} | ضریب: {multiplier:.2f}x\n"
     
-    # --- سود دوره (فقط اگه لیگ باز شده) ---
     if "league" in features:
         text += f"💵 سود دوره {period_num}: {profit:,}\n"
     
-    # --- پت ---
     if "pet" in features:
         pet = user.get("pet")
         pet_text = f"{pet['emoji']} {pet['name']}" if pet else "ندارد"
         text += f"🐾 پت: {pet_text}\n"
     
-    # --- کارگر ---
     if "worker" in features:
         text += f"👷 کارگر: لول {user['worker']['level']} ({'فعال' if user['worker']['active'] else 'غیرفعال'})\n"
     
-    # --- کلن ---
     if "clan" in features:
         if user.get("clan_id"):
             clan = get_clan(user["clan_id"])
@@ -564,15 +608,25 @@ def build_status_text(user, user_id):
         else:
             text += f"🏰 کلن: بدون کلن\n"
     
-    # --- هدیه ---
     if "gift" in features:
         text += f"🎁 هدیه: داده {user.get('gifts_given',0)} | گرفته {user.get('gifts_received',0)}\n"
     
-    # --- لیگ ---
     if "league" in features:
         rank = get_user_league_rank(user_id, user)
         text += f"🏅 رتبه لیگ: {rank}\n"
         text += f"🎖️ افتخارات: {len(user.get('achievements', []))}\n"
+    
+    # وضعیت رشد
+    if user["state"] == "growing":
+        rem = get_remaining_seconds(user)
+        if rem is not None and rem > 0:
+            mins = rem // 60
+            secs = rem % 60
+            text += f"⏳ زمان رسیدن: {mins}:{secs:02d}\n"
+        else:
+            text += f"⏳ زمان رسیدن: به‌زودی\n"
+    elif user["state"] == "harvested":
+        text += f"✅ آماده فروش\n"
     
     text += (
         f"🌱 میوه فعلی: {FRUITS[user['current_fruit']]}\n\n"
@@ -613,26 +667,30 @@ dp = Dispatcher()
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
+    # ✅ چک رسیدن میوه و ریست دوره قبل از هر کار
+    check_harvest(user_id)
+    check_period_reset(user_id)
+    
     user = get_user(user_id)
     if not user or user.get("name", "") == "":
         await state.set_state(UserForm.name)
         await message.answer("👤 لطفاً یک نام برای خود انتخاب کن (حداقل ۳ کاراکتر، بدون فاصله، تکراری نباشد):")
         return
-    check_period_reset(user_id)
     await show_main_menu(message)
 
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
     user_id = message.from_user.id
-    user = get_user(user_id)
-    if not user: return
+    check_harvest(user_id)
     check_period_reset(user_id)
     user = get_user(user_id)
+    if not user: return
     await message.answer(build_status_text(user, user_id), reply_markup=get_keyboard(user_id))
 
 @dp.message(Command("gift"))
 async def cmd_gift(message: Message, state: FSMContext):
     user_id = message.from_user.id
+    check_harvest(user_id)
     user = get_user(user_id)
     if not user or not has_feature(user, "gift"):
         await message.answer("🔒 این ویژگی در لول ۶ باز می‌شود.")
@@ -807,12 +865,13 @@ async def show_main_menu(message: Message):
 @dp.callback_query()
 async def on_callback(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
-    data = callback.data
     user_id = callback.from_user.id
-    user = get_user(user_id)
-    if not user: return
     
+    # ✅ چک رسیدن میوه و ریست دوره
+    check_harvest(user_id)
     check_period_reset(user_id)
+    
+    data = callback.data
     user = get_user(user_id)
     if not user: return
     
@@ -821,7 +880,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     elif data == "status":
         await edit_status(callback, user, user_id)
     elif data == "buy":
-        await buy_seed(callback, user, user_id, bot)
+        await buy_seed(callback, user, user_id)
     elif data == "sell":
         await sell_fruit(callback, user, user_id)
     elif data.startswith("switch_"):
@@ -894,7 +953,8 @@ async def switch_fruit(callback, user, user_id, idx):
     update_user(user_id, {"current_fruit": idx})
     await callback.message.edit_text(f"✅ میوه فعلی: {FRUITS[idx]}", reply_markup=get_keyboard(user_id))
 
-async def buy_seed(callback, user, user_id, bot):
+# ==================== ✅ خرید بذر (اصلاح‌شده بدون asyncio.sleep) ====================
+async def buy_seed(callback, user, user_id):
     cf = user["current_fruit"]
     effects, _ = get_season_effects()
     buy_price = int(PRICES[cf][0] * user["prestige_multiplier"] * effects["buy_mult"])
@@ -913,19 +973,23 @@ async def buy_seed(callback, user, user_id, bot):
     if speed_bonus > 0:
         growth_time *= (1 - speed_bonus / 100)
     
-    update_user(user_id, {"coins": user["coins"] - buy_price, "state": "growing"})
-    await callback.message.edit_text(f"🌱 {FRUITS[cf]} کاشته شد! {growth_time:.1f} دقیقه دیگه می‌رسه.", reply_markup=get_keyboard(user_id))
-    asyncio.create_task(grow_complete(user_id, callback.message.chat.id, growth_time, bot))
+    # ✅ ذخیره‌ی زمان دقیق رسیدن توی data.json (نه توی حافظه)
+    harvest_dt = datetime.now() + timedelta(minutes=growth_time)
+    
+    update_user(user_id, {
+        "coins": user["coins"] - buy_price,
+        "state": "growing",
+        "harvest_time": harvest_dt.isoformat(),
+    })
+    
+    mins = int(growth_time)
+    secs = int((growth_time - mins) * 60)
+    await callback.message.edit_text(
+        f"🌱 {FRUITS[cf]} کاشته شد!\n⏳ زمان رسیدن: {mins}:{secs:02d} دقیقه",
+        reply_markup=get_keyboard(user_id)
+    )
 
-async def grow_complete(user_id, chat_id, minutes, bot):
-    await asyncio.sleep(minutes * 60)
-    user = get_user(user_id)
-    if user and user["state"] == "growing":
-        update_user(user_id, {"state": "harvested"})
-        try:
-            await bot.send_message(chat_id, f"🍓 {FRUITS[user['current_fruit']]} رسید!", reply_markup=get_keyboard(user_id))
-        except: pass
-
+# ==================== ✅ فروش (اصلاح‌شده) ====================
 async def sell_fruit(callback, user, user_id):
     if user["state"] != "harvested":
         await callback.message.edit_text("⏳ هنوز نرسیده!", reply_markup=get_keyboard(user_id)); return
@@ -967,7 +1031,8 @@ async def sell_fruit(callback, user, user_id):
         xp_needed = xp_needed_for(new_level)
         level_up_msg = f"\n🎉 **لول آپ! لول {new_level}!**"
     
-    update_user(user_id, {"coins": new_coins, "xp": new_xp, "level": new_level, "state": "idle"})
+    update_user(user_id, {"coins": new_coins, "xp": new_xp, "level": new_level,
+                           "state": "idle", "harvest_time": None})
     update_leaderboard(user_id, user["name"], new_coins, new_level, user["prestige"])
     
     updated_user = get_user(user_id)
@@ -1152,7 +1217,7 @@ async def buy_prestige(callback, user, user_id):
     new_user["gifts_given"] = user.get("gifts_given", 0)
     new_user["gifts_received"] = user.get("gifts_received", 0)
     new_user["achievements"] = user.get("achievements", [])
-    new_user["clan_id"] = user.get("clan_id")  # ✅ کلن حفظ می‌شه
+    new_user["clan_id"] = user.get("clan_id")
     new_user["last_seen_period"] = get_period_number()
     new_user["current_period"] = get_period_number()
     data = load_data()
