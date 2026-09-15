@@ -63,9 +63,7 @@ SHOP_PRICES = {
     7: {5000: 25650000000, 10000: 51300000000, 20000: 102600000000, 50000: 256500000000, 70000: 360000000000, 100000: 513000000000},
 }
 
-# ✅ ظرفیت انبار بر اساس لول
 INVENTORY_CAPACITY = {1: 1, 2: 2, 3: 3, 4: 5, 5: 8, 6: 12, 7: 20}
-# ✅ قیمت زمین‌های اضافی (دوم، سوم، چهارم، پنجم)
 LAND_PRICES = [5000, 150000, 6000000, 100000000]
 MAX_PLOTS = 5
 
@@ -145,7 +143,7 @@ def create_default_user(user_id):
         "plots": [{"fruit": 0, "state": "idle", "harvest_time": None}],
         "max_plots": 1,
         "current_fruit": 0,
-        "inventory": {},  # ✅ dict: {"توت‌فرنگی": 2, "طلایی_سیب": 1}
+        "inventory": {},
         "upgrades": {"auto_water": 0, "golden_pot": 0, "professional_seeder": 0},
         "worker": {"level": 1, "active": False},
         "daily_orders": {"date": "", "orders": [], "completed": False},
@@ -167,7 +165,6 @@ def _ensure_keys(data):
     return data
 
 def _migrate_user(u, gst):
-    # تبدیل inventory از list به dict
     inv = u.get("inventory", [])
     if isinstance(inv, list):
         new_inv = {}
@@ -177,14 +174,12 @@ def _migrate_user(u, gst):
     elif not isinstance(inv, dict):
         u["inventory"] = {}
     
-    # تبدیل state قدیمی به plots
     if "plots" not in u:
         old_fruit = u.get("current_fruit", 0)
         old_state = u.get("state", "idle")
         old_ht = u.get("harvest_time")
         u["plots"] = [{"fruit": old_fruit, "state": old_state, "harvest_time": old_ht}]
         u["max_plots"] = 1
-    # حذف فیلدهای قدیمی
     for k in ["state", "harvest_time"]:
         u.pop(k, None)
     
@@ -281,7 +276,6 @@ def get_inv_capacity(user):
     return INVENTORY_CAPACITY.get(user.get("level", 1), 1)
 
 def add_to_inventory(user_id, fruit_name):
-    """اضافه کردن میوه به انبار. اگه پر باشه False برمی‌گردونه"""
     user = get_user(user_id)
     if not user: return False
     if get_inv_count(user) >= get_inv_capacity(user):
@@ -460,7 +454,6 @@ def xp_needed_for(l): return XP_REQUIRED.get(l, 999999)
 def xp_from_sale(f): return random.randint(*XP_FROM_SALES[f]) if f in XP_FROM_SALES else 0
 
 def get_land_price(current_plots):
-    """قیمت زمین بعدی. اگه به حداکثر رسیده None برمی‌گردونه"""
     if current_plots >= MAX_PLOTS: return None
     return LAND_PRICES[current_plots - 1]
 
@@ -473,12 +466,10 @@ def get_keyboard(user_id):
     plots = user.get("plots", [])
     max_plots = user.get("max_plots", 1)
     
-    # ✅ اگه ۱ زمین: مثل قبل
+    # ✅ اگه ۱ زمین: دکمه‌ی خرید بذر (بدون نام میوه)
     if max_plots == 1:
         plot = plots[0]
         cf = plot.get("fruit", 0)
-        if cf not in get_available_fruits(user):
-            cf = get_available_fruits(user)[0]
         fruit = FRUITS[cf]
         
         if plot["state"] == "growing":
@@ -492,7 +483,7 @@ def get_keyboard(user_id):
             kb.button(f"📦 برداشت {fruit}", callback_data="harvest_0")
             kb.button(f"💰 فروش فوری {fruit}", callback_data="sell_immediate_0")
         else:
-            kb.button(f"🌱 خرید بذر {fruit}", callback_data="buy_0")
+            kb.button("🌱 خرید بذر", callback_data="buy_0")  # ✅ بدون نام میوه
         
         kb.adjust(2)
     else:
@@ -501,13 +492,7 @@ def get_keyboard(user_id):
         kb.button("📦 انبار", callback_data="inventory_menu")
         kb.adjust(2)
     
-    # انتخاب میوه
-    available = get_available_fruits(user)
-    if len(available) > 1:
-        for i in available:
-            mark = "✅ " if i == user.get("current_fruit", 0) else ""
-            kb.button(f"{mark}{FRUITS[i]}", callback_data=f"switch_{i}")
-        kb.adjust(3)
+    # ✅ دکمه‌های انتخاب میوه از صفحه اصلی حذف شدند
     
     # دکمه‌های عمومی
     kb.button("📊 وضعیت", callback_data="status")
@@ -585,7 +570,6 @@ def build_status_text(user, user_id):
         text += f"🏅 رتبه لیگ: {rank}\n"
         text += f"🎖️ افتخارات: {len(user.get('achievements', []))}\n"
     
-    # نمایش زمین‌ها
     plots = user.get("plots", [])
     if len(plots) > 1:
         text += f"\n🏞️ **زمین‌ها:**\n"
@@ -879,7 +863,6 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         fruit = data.replace("sell_inv_", "")
         await sell_from_inventory(callback, user, uid, fruit)
     elif data.startswith("plant_plot_"):
-        # plant_plot_<plot_idx>_<fruit_idx>
         parts = data.split("_")
         plot_idx = int(parts[2]); fruit_idx = int(parts[3])
         await plant_in_plot(callback, user, uid, plot_idx, fruit_idx)
@@ -943,7 +926,6 @@ async def show_lands_menu(callback, user, uid):
             text += f"🏞 زمین {i+1}: خالی (آماده کاشت)\n"
             kb.button(f"🏞{i+1} 🌱 خالی", callback_data=f"buy_{i}")
     
-    # نمایش قیمت زمین بعدی
     next_price = get_land_price(max_plots)
     if next_price:
         text += f"\n🛒 **خرید زمین {max_plots+1}:** {next_price:,} سکه\n"
@@ -971,7 +953,6 @@ async def show_inventory(callback, user, uid):
             if fruit_name.startswith("طلایی_"):
                 real = fruit_name.replace("طلایی_", "")
                 text += f"✨ {real} (طلایی): {cnt} عدد\n"
-                # بذر طلایی برای کاشت استفاده می‌شه (پیاده‌سازی ساده)
             else:
                 text += f"🍎 {fruit_name}: {cnt} عدد\n"
                 kb.button(f"💰 فروش {fruit_name}", callback_data=f"sell_inv_{fruit_name}")
@@ -999,7 +980,6 @@ async def buy_land(callback, user, uid):
         reply_markup=get_keyboard(uid))
 
 async def buy_seed_for_plot(callback, user, uid, plot_idx):
-    """خرید بذر برای زمین مشخص"""
     plots = user.get("plots", [])
     if plot_idx >= len(plots):
         await callback.message.edit_text("❌ زمین نامعتبر", reply_markup=get_keyboard(uid)); return
@@ -1010,7 +990,6 @@ async def buy_seed_for_plot(callback, user, uid, plot_idx):
     if plot["state"] == "harvested":
         await callback.message.edit_text("📦 اول برداشت کن.", reply_markup=get_keyboard(uid)); return
     
-    # انتخاب میوه
     available = get_available_fruits(user)
     effects, _ = get_season_effects()
     mult = user["prestige_multiplier"]
@@ -1046,7 +1025,7 @@ async def plant_in_plot(callback, user, uid, plot_idx, fruit_idx):
     harvest_dt = datetime.now() + timedelta(minutes=growth_time)
     plots[plot_idx] = {"fruit": fruit_idx, "state": "growing", "harvest_time": harvest_dt.isoformat()}
     
-    update_user(uid, {"coins": user["coins"] - buy_price, "plots": plots})
+    update_user(uid, {"coins": user["coins"] - buy_price, "plots": plots, "current_fruit": fruit_idx})
     mins = int(growth_time); secs = int((growth_time - mins) * 60)
     await callback.message.edit_text(
         f"🌱 {FRUITS[fruit_idx]} در زمین {plot_idx+1} کاشته شد!\n⏳ {mins}:{secs:02d} دقیقه",
@@ -1063,7 +1042,7 @@ async def harvest_plot(callback, user, uid, plot_idx):
     if not add_to_inventory(uid, fruit_name):
         await callback.message.edit_text(
             f"📦 انبارت پره! ({get_inv_count(user)}/{get_inv_capacity(user)})\n"
-            f"اول از انبار بفروش یا یه میوه دیگه‌ای رو بفروش.",
+            f"اول از انبار بفروش.",
             reply_markup=get_keyboard(uid))
         return
     
@@ -1075,7 +1054,6 @@ async def harvest_plot(callback, user, uid, plot_idx):
         reply_markup=get_keyboard(uid))
 
 async def sell_immediate(callback, user, uid, plot_idx):
-    """فروش فوری از زمین (بدون رفتن به انبار)"""
     plots = user.get("plots", [])
     if plot_idx >= len(plots): return
     plot = plots[plot_idx]
@@ -1094,7 +1072,6 @@ async def sell_from_inventory(callback, user, uid, fruit_name):
     except ValueError:
         await callback.message.edit_text("❌ میوه نامعتبر.", reply_markup=get_keyboard(uid)); return
     
-    # فروش از انبار
     inv[fruit_name] -= 1
     if inv[fruit_name] <= 0: del inv[fruit_name]
     
@@ -1192,35 +1169,7 @@ async def switch_fruit(callback, user, uid, idx):
     update_user(uid, {"current_fruit": idx})
     await callback.message.edit_text(f"✅ انتخاب: {FRUITS[idx]}", reply_markup=get_keyboard(uid))
 
-async def buy_seed(callback, user, uid):
-    """خرید بذر برای حالت تک‌زمینی"""
-    plot_idx = 0
-    plots = user.get("plots", [])
-    if not plots: return
-    plot = plots[plot_idx]
-    cf = plot.get("fruit", 0)
-    effects, _ = get_season_effects()
-    buy_price = int(PRICES[cf][0] * user["prestige_multiplier"] * effects["buy_mult"])
-    
-    if plot["state"] == "growing":
-        await callback.message.edit_text("⏳ در حال رشده.", reply_markup=get_keyboard(uid)); return
-    if plot["state"] == "harvested":
-        await callback.message.edit_text("📦 اول برداشت کن.", reply_markup=get_keyboard(uid)); return
-    if user["coins"] < buy_price:
-        await callback.message.edit_text(f"❌ نیاز به {buy_price:,}", reply_markup=get_keyboard(uid)); return
-    
-    growth_time = GROWTH_TIMES[cf] * effects["growth_mult"]
-    if user["upgrades"].get("auto_water", 0) > 0: growth_time *= 0.8
-    sb = get_pet_effect(user, "speed")
-    if sb > 0: growth_time *= (1 - sb / 100)
-    
-    harvest_dt = datetime.now() + timedelta(minutes=growth_time)
-    plots[plot_idx] = {"fruit": cf, "state": "growing", "harvest_time": harvest_dt.isoformat()}
-    update_user(uid, {"coins": user["coins"] - buy_price, "plots": plots})
-    mins = int(growth_time); secs = int((growth_time - mins) * 60)
-    await callback.message.edit_text(f"🌱 کاشته شد! {mins}:{secs:02d} دیگه می‌رسه.", reply_markup=get_keyboard(uid))
-
-# ==================== بقیه (مختصر) ====================
+# ==================== بقیه ====================
 async def show_leaderboard(callback, user, uid):
     data = load_data()
     lb = data["leaderboard"][:10]
