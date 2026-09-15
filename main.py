@@ -156,6 +156,21 @@ class UserForm(StatesGroup):
     worker_plant_hours = State()
     worker_harvest_hours = State()
 
+# ==================== توابع کمکی زمان ====================
+def format_time_remaining(rem_seconds):
+    """فرمت‌بندی زمان باقی‌مونده به فارسی"""
+    if rem_seconds < 0:
+        rem_seconds = 0
+    h = int(rem_seconds // 3600)
+    m = int((rem_seconds % 3600) // 60)
+    s = int(rem_seconds % 60)
+    if h > 0:
+        return f"{h} ساعت و {m} دقیقه"
+    elif m > 0:
+        return f"{m} دقیقه و {s} ثانیه"
+    else:
+        return f"{s} ثانیه"
+
 # ==================== دیتابیس ====================
 def create_default_data():
     return {"game_start_time": datetime.now().isoformat(), "users": {},
@@ -624,7 +639,9 @@ def get_keyboard(user_id):
         if plot["state"] == "growing":
             rem = get_plot_remaining(plot)
             if rem is not None and rem > 0:
-                kb.button(f"⏳ در حال رشد ({rem//60}:{rem%60:02d})", callback_data="noop")
+                mins = rem // 60
+                secs = rem % 60
+                kb.button(f"⏳ در حال رشد ({mins}:{secs:02d})", callback_data="noop")
             else:
                 kb.button("⏳ در حال رشد...", callback_data="noop")
             kb.button("⏳ هنوز نرسیده!", callback_data="noop")
@@ -642,7 +659,7 @@ def get_keyboard(user_id):
         kb.button("📦 انبار", callback_data=f"{prefix}inventory_menu")
     if has_feature(user, "pet"): kb.button("🐾 پت", callback_data=f"{prefix}pet_menu")
     if has_feature(user, "leaderboard"): kb.button("🏆 لیدربرد", callback_data=f"{prefix}leaderboard")
-    if has_feature(user, "daily_orders"): kb.button("📦 سفارشات روزانه", callback_data=f"{prefix}daily_orders")
+    if has_feature(user, "daily_orders"): kb.button("📦 ماموریت‌ها", callback_data=f"{prefix}daily_orders")
     if has_feature(user, "upgrades"): kb.button("🔧 ارتقاء ابزار", callback_data=f"{prefix}upgrades")
     if has_feature(user, "shop"): kb.button("🛒 فروشگاه سکه", callback_data=f"{prefix}shop")
     if has_feature(user, "worker"): kb.button("👷 کارگرها", callback_data=f"{prefix}worker_menu")
@@ -705,16 +722,14 @@ def build_status_text(user, user_id):
         if pw.get("active"):
             try:
                 exp = datetime.fromisoformat(pw["expires_at"])
-                rem = exp - datetime.now()
-                h = int(rem.total_seconds() // 3600)
-                text += f"🌱 کارگر کاشت: فعال ({h}s)\n"
+                rem = (exp - datetime.now()).total_seconds()
+                text += f"🌱 کارگر کاشت: فعال ({format_time_remaining(rem)})\n"
             except: text += f"🌱 کارگر کاشت: فعال\n"
         if hw.get("active"):
             try:
                 exp = datetime.fromisoformat(hw["expires_at"])
-                rem = exp - datetime.now()
-                h = int(rem.total_seconds() // 3600)
-                text += f"💼 کارگر برداشت/فروش: فعال ({h}s)\n"
+                rem = (exp - datetime.now()).total_seconds()
+                text += f"💼 کارگر برداشت/فروش: فعال ({format_time_remaining(rem)})\n"
             except: text += f"💼 کارگر برداشت/فروش: فعال\n"
     if "clan" in feats:
         if user.get("clan_id"):
@@ -1627,10 +1642,10 @@ async def show_lands_menu(callback, user, uid):
             kb.button(f"🏞{i+1} 🌱", callback_data=f"{prefix}buy_{i}")
     np = get_land_price(mp)
     if np:
-        text += f"\n🛒 زمین {mp+1}: {np:,}"
-        kb.button(f"🛒 ({np:,})", callback_data=f"{prefix}buy_land")
+        text += f"\n🛒 زمین {mp+1}: {np:,} سکه"
+        kb.button(f"🛒 خرید زمین ({np:,})", callback_data=f"{prefix}buy_land")
     kb.button("📦 انبار", callback_data=f"{prefix}inventory_menu")
-    kb.button("🔙", callback_data=f"{prefix}back")
+    kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(2)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
@@ -1646,20 +1661,37 @@ async def show_inventory(callback, user, uid):
                 text += f"✨ {fn.replace('طلایی_','')} (طلایی): {cnt}\n"
             else:
                 text += f"🍎 {fn}: {cnt}\n"
-                kb.button(f"💰 {fn}", callback_data=f"{prefix}sell_inv_{fn}")
-    kb.button("🔙", callback_data=f"{prefix}back")
+                kb.button(f"💰 فروش {fn}", callback_data=f"{prefix}sell_inv_{fn}")
+    kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(2)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
 async def buy_land(callback, user, uid):
     mp = user.get("max_plots", 1); pr = get_land_price(mp)
-    if pr is None: await callback.message.edit_text("✅ حداکثر!", reply_markup=get_keyboard(uid)); return
-    if user["coins"] < pr: await callback.message.edit_text(f"❌ {pr:,}", reply_markup=get_keyboard(uid)); return
+    if pr is None:
+        await callback.message.edit_text("✅ حداکثر زمین‌ها را داری.", reply_markup=get_keyboard(uid)); return
+    if user["coins"] < pr:
+        await callback.message.edit_text(
+            f"❌ **سکه کافی نیست!**\n"
+            f"💰 موجودی شما: {user['coins']:,}\n"
+            f"💵 نیاز: {pr:,}\n"
+            f"📉 کمبود: {pr - user['coins']:,}",
+            reply_markup=get_keyboard(uid)); return
     plots = user.get("plots", [])
     plots.append({"fruit": 0, "state": "idle", "harvest_time": None})
     update_user(uid, {"coins": user["coins"] - pr, "plots": plots, "max_plots": mp + 1})
     update_leaderboard(uid, user["name"], user["coins"] - pr, user["level"], user["prestige"])
-    await callback.message.edit_text(f"🎉 زمین {mp+1}!", reply_markup=get_keyboard(uid))
+    prefix = f"owner_{uid}_"
+    kb = InlineKeyboardBuilder()
+    kb.button("🏞️ زمین‌ها", callback_data=f"{prefix}lands_menu")
+    kb.button("🔙 منوی اصلی", callback_data=f"{prefix}back")
+    kb.adjust(1)
+    await callback.message.edit_text(
+        f"🎉 **زمین {mp+1} خریداری شد!**\n\n"
+        f"💰 هزینه: {pr:,} سکه\n"
+        f"💼 موجودی جدید: {user['coins'] - pr:,}\n"
+        f"🏞️ حالا {mp+1} زمین داری!",
+        reply_markup=kb.as_markup())
 
 async def buy_seed_for_plot(callback, user, uid, idx):
     plots = user.get("plots", [])
@@ -1675,7 +1707,7 @@ async def buy_seed_for_plot(callback, user, uid, idx):
         bp = int(PRICES[i][0] * m * eff["buy_mult"])
         text += f"• {FRUITS[i]}: {bp:,}\n"
         kb.button(f"🌱 {FRUITS[i]} ({bp:,})", callback_data=f"{prefix}plant_plot_{idx}_{i}")
-    kb.button("🔙", callback_data=f"{prefix}lands_menu")
+    kb.button("🔙 بازگشت", callback_data=f"{prefix}lands_menu")
     kb.adjust(1)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
@@ -1751,19 +1783,31 @@ async def show_leaderboard(callback, user, uid):
     if not lb: text += "خالیه!"
     await callback.message.edit_text(text, reply_markup=get_keyboard(uid))
 
+# ==================== ارتقاءها (اصلاح‌شده با اسم) ====================
 async def show_upgrades(callback, user, uid):
-    u = user["upgrades"]; c1 = 1000*(u.get("auto_water",0)+1); c2 = 2000*(u.get("golden_pot",0)+1); c3 = 5000*(u.get("professional_seeder",0)+1)
-    mp = user.get("max_plots", 1); lp = get_land_price(mp)
+    u = user["upgrades"]
+    c1 = 1000*(u.get("auto_water",0)+1)
+    c2 = 2000*(u.get("golden_pot",0)+1)
+    c3 = 5000*(u.get("professional_seeder",0)+1)
+    mp = user.get("max_plots", 1)
+    lp = get_land_price(mp)
     prefix = f"owner_{uid}_"
-    text = f"🔧 **ارتقاء:**\n💧 {c1:,}\n🏺 {c2:,}\n🌱 {c3:,}\n"
-    kb = InlineKeyboardBuilder()
-    kb.button(f"💧 ({c1:,})", callback_data=f"{prefix}upgrade_auto_water")
-    kb.button(f"🏺 ({c2:,})", callback_data=f"{prefix}upgrade_golden_pot")
-    kb.button(f"🌱 ({c3:,})", callback_data=f"{prefix}upgrade_professional_seeder")
+    text = (f"🔧 **ارتقاء ابزار**\n\n"
+            f"💧 **آبیاری خودکار** (۲۰٪ رشد سریع‌تر): **{c1:,}** سکه\n"
+            f"   خریداری شده: {u.get('auto_water',0)} بار\n\n"
+            f"🏺 **گلدان طلایی** (۱۰٪ فروش بیشتر): **{c2:,}** سکه\n"
+            f"   خریداری شده: {u.get('golden_pot',0)} بار\n\n"
+            f"🌱 **بذرپاش حرفه‌ای**: **{c3:,}** سکه\n"
+            f"   خریداری شده: {u.get('professional_seeder',0)} بار\n")
     if lp:
-        text += f"\n🏞️ زمین {mp+1}: {lp:,}"
-        kb.button(f"🏞️ ({lp:,})", callback_data=f"{prefix}buy_land")
-    kb.button("🔙", callback_data=f"{prefix}back")
+        text += f"\n🏞️ **خرید زمین {mp+1}:** **{lp:,}** سکه"
+    kb = InlineKeyboardBuilder()
+    kb.button(f"💧 آبیاری ({c1:,})", callback_data=f"{prefix}upgrade_auto_water")
+    kb.button(f"🏺 گلدان ({c2:,})", callback_data=f"{prefix}upgrade_golden_pot")
+    kb.button(f"🌱 بذرپاش ({c3:,})", callback_data=f"{prefix}upgrade_professional_seeder")
+    if lp:
+        kb.button(f"🏞️ خرید زمین ({lp:,})", callback_data=f"{prefix}buy_land")
+    kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(1)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
@@ -1771,14 +1815,16 @@ async def buy_upgrade(callback, user, uid, key):
     base = {"auto_water": 1000, "golden_pot": 2000, "professional_seeder": 5000}
     if key not in base: return
     cnt = user["upgrades"].get(key, 0); cost = base[key] * (cnt + 1)
-    if user["coins"] < cost: await callback.message.edit_text(f"❌ {cost:,}", reply_markup=get_keyboard(uid)); return
+    if user["coins"] < cost:
+        await callback.message.edit_text(
+            f"❌ **سکه کافی نیست!**\n💰 موجودی: {user['coins']:,}\n💵 نیاز: {cost:,}",
+            reply_markup=get_keyboard(uid)); return
     u = user["upgrades"]; u[key] = cnt + 1
     update_user(uid, {"coins": user["coins"] - cost, "upgrades": u})
     await callback.message.edit_text("✅ ارتقاء انجام شد!", reply_markup=get_keyboard(uid))
 
 # ==================== ماموریت‌های ساعتی ====================
 async def show_daily_orders(callback, user, uid):
-    # ✅ ریست هر ساعت
     current_hour = datetime.now().strftime("%Y-%m-%d-%H")
     if user["daily_orders"]["date"] != current_hour:
         available = get_available_fruits(user)
@@ -1797,10 +1843,9 @@ async def show_daily_orders(callback, user, uid):
     orders = user["daily_orders"]["orders"]
     if user["daily_orders"]["completed"]:
         next_hour = (datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
-        rem = next_hour - datetime.now()
-        m = int(rem.total_seconds() // 60)
+        rem = (next_hour - datetime.now()).total_seconds()
         await callback.message.edit_text(
-            f"📦 امروز تکمیل شده!\n⏰ ماموریت جدید تا {m} دقیقه دیگه میاد.",
+            f"📦 امروز تکمیل شده!\n⏰ ماموریت جدید تا {format_time_remaining(rem)} دیگه میاد.",
             reply_markup=get_keyboard(uid))
         return
     
@@ -1815,9 +1860,8 @@ async def show_daily_orders(callback, user, uid):
     text += f"\n💰 پاداش تقریبی: **{bonus:,}** سکه"
     
     next_hour = (datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
-    rem = next_hour - datetime.now()
-    m = int(rem.total_seconds() // 60)
-    text += f"\n⏰ ماموریت جدید: {m} دقیقه دیگه"
+    rem = (next_hour - datetime.now()).total_seconds()
+    text += f"\n⏰ ماموریت جدید: {format_time_remaining(rem)} دیگه"
     
     kb = InlineKeyboardBuilder()
     kb.button("✅ تکمیل ماموریت‌ها", callback_data=f"{prefix}complete_orders")
@@ -1885,7 +1929,7 @@ async def buy_shop(callback, user, uid, amount):
         except: pass
     except Exception as e: await callback.message.edit_text(f"❌ `{str(e)[:200]}`", reply_markup=get_keyboard(uid))
 
-# ==================== کارگرها UI ====================
+# ==================== کارگرها UI (اصلاح‌شده) ====================
 async def show_worker(callback, user, uid):
     workers = user.get("workers", {})
     pw = workers.get("planting", {})
@@ -1895,21 +1939,17 @@ async def show_worker(callback, user, uid):
     if pw.get("active"):
         try:
             exp = datetime.fromisoformat(pw["expires_at"])
-            rem = exp - datetime.now()
-            h = int(rem.total_seconds() // 3600)
-            m = int((rem.total_seconds() % 3600) // 60)
+            rem = (exp - datetime.now()).total_seconds()
             fname = FRUITS[pw["fruit"]] if pw.get("fruit") is not None else "?"
-            text += f"🌱 **کارگر کاشت:** فعال ({fname})\n   ⏰ {h}s {m}d باقی\n\n"
+            text += f"🌱 **کارگر کاشت:** فعال ({fname})\n   ⏰ {format_time_remaining(rem)} باقی\n\n"
         except: text += f"🌱 **کارگر کاشت:** فعال\n\n"
     else:
         text += f"🌱 **کارگر کاشت:** غیرفعال\n\n"
     if hw.get("active"):
         try:
             exp = datetime.fromisoformat(hw["expires_at"])
-            rem = exp - datetime.now()
-            h = int(rem.total_seconds() // 3600)
-            m = int((rem.total_seconds() % 3600) // 60)
-            text += f"💼 **کارگر برداشت و فروش:** فعال\n   ⏰ {h}s {m}d باقی\n\n"
+            rem = (exp - datetime.now()).total_seconds()
+            text += f"💼 **کارگر برداشت و فروش:** فعال\n   ⏰ {format_time_remaining(rem)} باقی\n\n"
         except: text += f"💼 **کارگر برداشت و فروش:** فعال\n\n"
     else:
         text += f"💼 **کارگر برداشت و فروش:** غیرفعال\n\n"
