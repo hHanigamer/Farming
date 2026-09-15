@@ -387,6 +387,7 @@ def get_period_number():
     s = data.get("game_start_time")
     return get_week_number(s) if s else 1
 
+# ✅ پردازش پایان دوره با سیستم مدال جدید
 def process_period_end(pn, user, uid_str):
     if user.get("level", 1) < 7 and user.get("prestige", 0) == 0: return
     pk = str(user.get("prestige", 0))
@@ -401,16 +402,40 @@ def process_period_end(pn, user, uid_str):
     sm = sorted(members.items(), key=lambda x: x[1].get("profit", 0), reverse=True)
     rank = next((i+1 for i, (uid, _) in enumerate(sm) if uid == uid_str), 0)
     if rank == 0: return
+    
+    ach_date = datetime.now().strftime("%Y-%m-%d")
+    prestige = user.get("prestige", 0)
+    
+    # ✅ حالت ۱: کمتر از ۱۰ نفر → مدال عقاب تنها
     if total < 10:
         ach = {"type": "lone_eagle", "rank": rank, "period": pn,
-               "league": user.get("prestige", 0), "date": datetime.now().strftime("%Y-%m-%d")}
+               "league": prestige, "date": ach_date}
         user.setdefault("achievements", []).append(ach)
-    else:
-        pct = max(1, int((rank / total) * 100))
-        if pct <= 10:
-            ach = {"type": "top_percent", "percent": pct, "period": pn,
-                   "league": user.get("prestige", 0), "date": datetime.now().strftime("%Y-%m-%d")}
-            user.setdefault("achievements", []).append(ach)
+        return
+    
+    # ✅ مدال‌ها (فقط برای ۱۰ نفر یا بیشتر)
+    # نفر اول: همیشه طلا (وقتی total >= 10)
+    if rank == 1:
+        medal = {"type": "medal_gold", "rank": 1, "period": pn,
+                 "league": prestige, "date": ach_date}
+        user.setdefault("achievements", []).append(medal)
+    # نفر دوم: نقره (وقتی total >= 31)
+    elif rank == 2 and total >= 31:
+        medal = {"type": "medal_silver", "rank": 2, "period": pn,
+                 "league": prestige, "date": ach_date}
+        user.setdefault("achievements", []).append(medal)
+    # نفر سوم: برنز (وقتی total >= 41)
+    elif rank == 3 and total >= 41:
+        medal = {"type": "medal_bronze", "rank": 3, "period": pn,
+                 "league": prestige, "date": ach_date}
+        user.setdefault("achievements", []).append(medal)
+    
+    # ✅ ۱۰٪ برتر (برای همه، شامل مدال‌دارها)
+    pct = max(1, int((rank / total) * 100))
+    if pct <= 10:
+        ach = {"type": "top_percent", "percent": pct, "period": pn,
+               "league": prestige, "date": ach_date}
+        user.setdefault("achievements", []).append(ach)
 
 def check_period_reset(user_id):
     data = load_data()
@@ -466,7 +491,6 @@ def get_keyboard(user_id):
     plots = user.get("plots", [])
     max_plots = user.get("max_plots", 1)
     
-    # ✅ اگه ۱ زمین: دکمه‌ی خرید بذر (بدون نام میوه)
     if max_plots == 1:
         plot = plots[0]
         cf = plot.get("fruit", 0)
@@ -483,18 +507,14 @@ def get_keyboard(user_id):
             kb.button(f"📦 برداشت {fruit}", callback_data="harvest_0")
             kb.button(f"💰 فروش فوری {fruit}", callback_data="sell_immediate_0")
         else:
-            kb.button("🌱 خرید بذر", callback_data="buy_0")  # ✅ بدون نام میوه
+            kb.button("🌱 خرید بذر", callback_data="buy_0")
         
         kb.adjust(2)
     else:
-        # ✅ چند زمین: دکمه‌ی زمین‌ها
         kb.button("🏞️ زمین‌ها", callback_data="lands_menu")
         kb.button("📦 انبار", callback_data="inventory_menu")
         kb.adjust(2)
     
-    # ✅ دکمه‌های انتخاب میوه از صفحه اصلی حذف شدند
-    
-    # دکمه‌های عمومی
     kb.button("📊 وضعیت", callback_data="status")
     if max_plots == 1:
         kb.button("📦 انبار", callback_data="inventory_menu")
@@ -1510,17 +1530,26 @@ async def show_league_menu(callback, user, uid):
     kb.adjust(1)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
+# ✅ نمایش افتخارات با مدال‌ها
 async def show_achievements(callback, user, uid):
     achs = user.get("achievements", [])
-    if not achs: text = "🎖️ خالی!"
+    if not achs:
+        text = "🎖️ **افتخارات**\n\nهنوز افتخاری نداری!"
     else:
-        text = f"🎖️ **افتخارات ({len(achs)})**\n\n"
+        text = f"🎖️ **افتخارات {user['name']}** ({len(achs)} عدد)\n\n"
         for a in achs[-20:]:
             ln = LEAGUE_FA.get(a.get("league", 0), "?")
-            if a["type"] == "top_percent":
+            t = a.get("type")
+            if t == "top_percent":
                 text += f"🏅 جزو {a['percent']}٪ برتر دوره {a['period']}، لیگ {ln}\n"
-            elif a["type"] == "lone_eagle":
-                text += f"🦅 عقاب تنهای {a['rank']} دوره {a['period']}، لیگ {ln}\n"
+            elif t == "lone_eagle":
+                text += f"🦅 عقاب تنهای {a['rank']} در دوره {a['period']}، لیگ {ln}\n"
+            elif t == "medal_gold":
+                text += f"🥇 مدال طلای دوره {a['period']}، لیگ {ln}\n"
+            elif t == "medal_silver":
+                text += f"🥈 مدال نقره‌ی دوره {a['period']}، لیگ {ln}\n"
+            elif t == "medal_bronze":
+                text += f"🥉 مدال برنز دوره {a['period']}، لیگ {ln}\n"
     await callback.message.edit_text(text, reply_markup=get_keyboard(uid))
 
 # ==================== اجرا ====================
