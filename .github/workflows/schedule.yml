@@ -10,20 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     permissions:
-      contents: write  # برای push کردن به شاخه data-storage
+      contents: write
 
     steps:
       - name: Checkout main code
         uses: actions/checkout@v4
-        with:
-          path: main
-
-      - name: Checkout data branch
-        uses: actions/checkout@v4
-        with:
-          ref: data-storage
-          path: data-branch
-        continue-on-error: true  # اگر شاخه وجود نداشت، خطا نده
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -31,16 +22,13 @@ jobs:
           python-version: '3.10'
 
       - name: Install deps
-        run: pip install -r main/requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Copy data.json if exists
+      - name: Fetch data from data-storage branch
         run: |
-          if [ -f data-branch/data.json ]; then
-            cp data-branch/data.json main/data.json
-            echo "✅ داده‌های قبلی بارگذاری شد"
-          else
-            echo "⚠️ فایل داده‌ای یافت نشد، از صفر شروع می‌شود"
-          fi
+          git fetch origin data-storage || echo "شاخه داده وجود ندارد"
+          git checkout origin/data-storage -- data.json 2>/dev/null || echo "فایل داده یافت نشد"
+          git checkout origin/data-storage -- data_backup.json 2>/dev/null || echo "فایل پشتیبان یافت نشد"
 
       - name: Run bot
         run: python main.py
@@ -48,19 +36,22 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           PROVIDER_TOKEN: ${{ secrets.PROVIDER_TOKEN }}
 
-      - name: Save data to branch
+      - name: Save data to data-storage branch
         if: always()
         run: |
-          mkdir -p data-branch
-          if [ -f main/data.json ]; then
-            cp main/data.json data-branch/data.json
-          fi
-          if [ -f main/data_backup.json ]; then
-            cp main/data_backup.json data-branch/data_backup.json
-          fi
-          cd data-branch
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data.json data_backup.json || true
+          
+          # ذخیره در یک شاخه موقت
+          git checkout -B data-storage-temp
+          
+          # پاک کردن فایل‌های اضافی
+          git rm -rf . --cached > /dev/null 2>&1 || true
+          find . -maxdepth 1 -type f ! -name 'data.json' ! -name 'data_backup.json' -exec git rm --cached {} \; > /dev/null 2>&1 || true
+          
+          # اضافه کردن فقط فایل‌های داده
+          if [ -f data.json ]; then git add -f data.json; fi
+          if [ -f data_backup.json ]; then git add -f data_backup.json; fi
+          
           git commit -m "Update game data [skip ci]" || echo "بدون تغییر"
-          git push origin data-storage || echo "خطا در push"
+          git push origin data-storage-temp:data-storage --force
