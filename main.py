@@ -126,7 +126,8 @@ TEXT_COMMANDS = {
     "پت": "pet_menu", "حیوان": "pet_menu", "حیوانات": "pet_menu", "pet": "pet_menu",
     "لیدربرد": "leaderboard", "رتبه": "leaderboard", "رتبه‌بندی": "leaderboard", "leaderboard": "leaderboard",
     "ارتقاء": "upgrades", "ارتقا": "upgrades", "ارتقاء ابزار": "upgrades", "upgrades": "upgrades",
-    "سفارش": "daily_orders", "سفارشات": "daily_orders", "سفارشات روزانه": "daily_orders", "orders": "daily_orders",
+    "سفارش": "daily_orders", "سفارشات": "daily_orders", "سفارشات روزانه": "daily_orders",
+    "ماموریت": "daily_orders", "ماموریت‌ها": "daily_orders", "orders": "daily_orders",
     "فروشگاه": "shop", "فروشگاه سکه": "shop", "shop": "shop",
     "کارگر": "worker_menu", "کارگرها": "worker_menu", "worker": "worker_menu",
     "کلن": "clan_menu", "clan": "clan_menu",
@@ -207,14 +208,12 @@ def _migrate_user(u, gst):
         u["max_plots"] = 1
     for k in ["state", "harvest_time"]:
         u.pop(k, None)
-    # ✅ مهاجرت کارگر
     if "workers" not in u:
         u["workers"] = {
             "planting": {"active": False, "fruit": None, "hours": 0, "expires_at": None},
             "harvest_sell": {"active": False, "hours": 0, "expires_at": None},
         }
     u.pop("worker", None)
-    # ✅ آپدیت ققنوس‌های قدیمی
     if u.get("phoenix_owned") and u.get("pet", {}).get("name") == "ققنوس":
         if "speed_value" not in u["pet"]:
             u["pet"] = PHOENIX_PET
@@ -500,7 +499,6 @@ def is_banned(user_id): return str(user_id) in load_data().get("banned", [])
 
 # ==================== پردازش کارگرها ====================
 def process_workers(user_id):
-    """هر بار ربات بیدار می‌شه، کارگرها کار می‌کنن"""
     data = load_data()
     user = data["users"].get(str(user_id))
     if not user: return
@@ -509,7 +507,6 @@ def process_workers(user_id):
     changed = False
     effects, _ = get_season_effects()
 
-    # ===== کارگر کاشت =====
     pw = workers.get("planting", {})
     if pw.get("active"):
         try:
@@ -537,7 +534,6 @@ def process_workers(user_id):
         except Exception as e:
             print(f"Worker planting error: {e}")
 
-    # ===== کارگر برداشت و فروش =====
     hw = workers.get("harvest_sell", {})
     if hw.get("active"):
         try:
@@ -546,7 +542,6 @@ def process_workers(user_id):
                 hw["active"] = False; hw["expires_at"] = None
                 changed = True
             else:
-                # ۱. برداشت
                 for plot in user.get("plots", []):
                     if plot["state"] != "harvested": continue
                     fn = FRUITS[plot.get("fruit", 0)]
@@ -558,7 +553,6 @@ def process_workers(user_id):
                     plot["state"] = "idle"
                     plot["harvest_time"] = None
                     changed = True
-                # ۲. فروش از انبار (۲۰٪ کمیسیون)
                 inv = user.get("inventory", {})
                 for fn in list(inv.keys()):
                     if inv.get(fn, 0) <= 0: continue
@@ -704,7 +698,6 @@ def build_status_text(user, user_id):
         text += f"🐾 پت: {pet_text}\n"
     text += f"📦 انبار: {inv_count}/{inv_cap}\n"
     text += f"🏞️ زمین‌ها: {user.get('max_plots', 1)}\n"
-    # کارگرها
     if "worker" in feats:
         workers = user.get("workers", {})
         pw = workers.get("planting", {})
@@ -777,7 +770,7 @@ def get_user_league_rank(user_id, user):
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
 
-# ==================== ADMIN COMMANDS (English) ====================
+# ==================== ADMIN COMMANDS ====================
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if not is_admin(message.from_user.id):
@@ -796,8 +789,7 @@ async def cmd_admin(message: Message):
             "**System:**\n"
             "`/stats` — Bot stats\n"
             "`/broadcast <message>`\n"
-            "`/reset_season`\n"
-            "`/reset_league`\n"
+            "`/reset_season` / `/reset_league`\n"
             "`/events` / `/end_event`\n\n"
             "**Event:**\n"
             "`/event <buy> <sell> <growth> <xp> <hours> <msg>`\n\n"
@@ -1210,7 +1202,7 @@ async def process_clan_chat(message: Message, state: FSMContext):
         except: pass
     await state.clear()
 
-# ==================== کارگرها ====================
+# ==================== کارگرها FSM ====================
 @dp.message(UserForm.worker_plant_hours)
 async def wp_hours_input(message: Message, state: FSMContext):
     uid = message.from_user.id
@@ -1456,7 +1448,7 @@ async def wp_confirm(callback: CallbackQuery, state: FSMContext):
 async def wp_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
-    await callback.message.edit_text("❌ لغو شد.", reply_markup=get_keyboard(uid))
+    await callback.message.edit_text("❌ لغو شد.", reply_markup=get_keyboard(callback.from_user.id))
 
 @dp.callback_query(F.data == "wh_confirm")
 async def wh_confirm(callback: CallbackQuery, state: FSMContext):
@@ -1481,7 +1473,7 @@ async def wh_confirm(callback: CallbackQuery, state: FSMContext):
 async def wh_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
-    await callback.message.edit_text("❌ لغو شد.", reply_markup=get_keyboard(uid))
+    await callback.message.edit_text("❌ لغو شد.", reply_markup=get_keyboard(callback.from_user.id))
 
 # ==================== MAIN CALLBACK ====================
 @dp.callback_query()
@@ -1492,7 +1484,6 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     
     raw_data = callback.data or ""
     
-    # ✅ چک مالکیت دکمه
     if raw_data.startswith("owner_"):
         parts = raw_data.split("_", 2)
         owner_id = parts[1]
@@ -1504,9 +1495,8 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             return
         data = real_action
     else:
-        # پیام‌های قدیمی یا سیستمی (مثل confirm) بدون owner
         if raw_data in ["confirm_yes", "confirm_no", "wp_confirm", "wp_cancel", "wh_confirm", "wh_cancel"]:
-            return  # این‌ها رو هندلرهای اختصاصی خودشون مدیریت می‌کنن
+            return
         data = raw_data
     
     check_all_harvests(uid); process_workers(uid); check_period_reset(uid)
@@ -1786,49 +1776,76 @@ async def buy_upgrade(callback, user, uid, key):
     update_user(uid, {"coins": user["coins"] - cost, "upgrades": u})
     await callback.message.edit_text("✅ ارتقاء انجام شد!", reply_markup=get_keyboard(uid))
 
+# ==================== ماموریت‌های ساعتی ====================
 async def show_daily_orders(callback, user, uid):
-    t = datetime.now().strftime("%Y-%m-%d")
-    if user["daily_orders"]["date"] != t:
+    # ✅ ریست هر ساعت
+    current_hour = datetime.now().strftime("%Y-%m-%d-%H")
+    if user["daily_orders"]["date"] != current_hour:
         available = get_available_fruits(user)
         mission_fruits = [i for i in available if i < 6]
         if not mission_fruits: mission_fruits = [0]
+        
+        num_missions = min(3, len(mission_fruits))
+        chosen_fruits = random.sample(mission_fruits, num_missions)
         orders = []
-        for _ in range(3):
-            fi = random.choice(mission_fruits)
+        for fi in chosen_fruits:
             orders.append({"fruit": FRUITS[fi], "count": random.randint(1, 3)})
-        update_user(uid, {"daily_orders": {"date": t, "orders": orders, "completed": False}})
+        
+        update_user(uid, {"daily_orders": {"date": current_hour, "orders": orders, "completed": False}})
         user = get_user(uid)
+    
     orders = user["daily_orders"]["orders"]
     if user["daily_orders"]["completed"]:
-        await callback.message.edit_text("📦 امروز تکمیل شده! فردا دوباره بیا.", reply_markup=get_keyboard(uid)); return
+        next_hour = (datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+        rem = next_hour - datetime.now()
+        m = int(rem.total_seconds() // 60)
+        await callback.message.edit_text(
+            f"📦 امروز تکمیل شده!\n⏰ ماموریت جدید تا {m} دقیقه دیگه میاد.",
+            reply_markup=get_keyboard(uid))
+        return
+    
     inv = user.get("inventory", {})
     prefix = f"owner_{uid}_"
-    text = ("📦 **سفارشات روزانه**\n\n"
-            "💡 **با انجام سفارش روزانه ×۱.۵ بیشتر سود کن!**\n\n")
+    text = ("📦 **ماموریت‌های ساعتی**\n\n"
+            "💡 **با انجام ماموریت ×۱.۵ بیشتر سود کن!**\n\n")
     for i, o in enumerate(orders, 1):
         h = inv.get(o["fruit"], 0)
         text += f"{i}. {o['count']}× {o['fruit']} ({'✅' if h >= o['count'] else '❌'} داری: {h})\n"
     bonus = int(sum(PRICES[FRUITS.index(o["fruit"])][1] * o["count"] * 1.5 for o in orders) * user["prestige_multiplier"])
     text += f"\n💰 پاداش تقریبی: **{bonus:,}** سکه"
+    
+    next_hour = (datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+    rem = next_hour - datetime.now()
+    m = int(rem.total_seconds() // 60)
+    text += f"\n⏰ ماموریت جدید: {m} دقیقه دیگه"
+    
     kb = InlineKeyboardBuilder()
-    kb.button("✅ تکمیل سفارشات", callback_data=f"{prefix}complete_orders")
+    kb.button("✅ تکمیل ماموریت‌ها", callback_data=f"{prefix}complete_orders")
     kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(1)
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
 async def complete_orders(callback, user, uid):
-    if user["daily_orders"]["completed"]: await callback.message.edit_text("قبلاً!", reply_markup=get_keyboard(uid)); return
-    orders = user["daily_orders"]["orders"]; inv = user.get("inventory", {})
+    if user["daily_orders"]["completed"]:
+        await callback.message.edit_text("قبلاً تکمیل شده!", reply_markup=get_keyboard(uid)); return
+    orders = user["daily_orders"]["orders"]
+    inv = user.get("inventory", {})
     for o in orders:
-        if inv.get(o["fruit"], 0) < o["count"]: await callback.message.edit_text(f"❌ کمبود {o['fruit']}", reply_markup=get_keyboard(uid)); return
+        if inv.get(o["fruit"], 0) < o["count"]:
+            await callback.message.edit_text(f"❌ کمبود {o['fruit']}", reply_markup=get_keyboard(uid)); return
     for o in orders:
         inv[o["fruit"]] -= o["count"]
         if inv[o["fruit"]] <= 0: del inv[o["fruit"]]
     bonus = int(sum(PRICES[FRUITS.index(o["fruit"])][1] * o["count"] * 1.5 for o in orders) * user["prestige_multiplier"])
     nc = user["coins"] + bonus
-    update_user(uid, {"coins": nc, "inventory": inv, "daily_orders": {**user["daily_orders"], "completed": True}})
+    current_hour = datetime.now().strftime("%Y-%m-%d-%H")
+    update_user(uid, {
+        "coins": nc,
+        "inventory": inv,
+        "daily_orders": {"date": current_hour, "orders": orders, "completed": True}
+    })
     update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
-    await callback.message.edit_text(f"✅ سفارشات تکمیل شد!\n💰 +{bonus:,}", reply_markup=get_keyboard(uid))
+    await callback.message.edit_text(f"✅ ماموریت‌ها تکمیل شد!\n💰 +{bonus:,} سکه", reply_markup=get_keyboard(uid))
 
 async def show_shop(callback, user, uid):
     lv = user["level"]
