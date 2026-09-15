@@ -122,7 +122,6 @@ CLAN_BONUS_PER_LEVEL = 2
 LEAGUE_FA = {0: "I", 1: "II", 2: "III", 3: "IV", 4: "V", 5: "VI",
              6: "VII", 7: "VIII", 8: "IX", 9: "X", 10: "XI"}
 
-# ==================== بازار ====================
 MARKET_CURRENCIES = {
     "millet": {"name": "ارزن", "emoji": "🌱", "base_price": 5},
     "alfalfa": {"name": "یونجه", "emoji": "🌿", "base_price": 80},
@@ -196,31 +195,21 @@ def format_coins(amount):
     return f"{result} سکه"
 
 def format_market_price(p):
-    if p >= 1000:
-        return f"{p:,.2f}"
-    elif p >= 100:
-        return f"{p:.2f}"
-    elif p >= 1:
-        return f"{p:.3f}"
-    else:
-        return f"{p:.4f}"
+    if p >= 1000: return f"{p:,.2f}"
+    elif p >= 100: return f"{p:.2f}"
+    elif p >= 1: return f"{p:.3f}"
+    else: return f"{p:.4f}"
 
 async def safe_answer(callback):
-    try:
-        await callback.answer()
-    except Exception:
-        pass
+    try: await callback.answer()
+    except Exception: pass
 
 async def safe_edit(callback, text, **kwargs):
-    try:
-        return await callback.message.edit_text(text, **kwargs)
+    try: return await callback.message.edit_text(text, **kwargs)
     except Exception:
-        try:
-            return await bot.send_message(callback.from_user.id, text, **kwargs)
-        except Exception:
-            pass
+        try: return await bot.send_message(callback.from_user.id, text, **kwargs)
+        except Exception: pass
 
-# ==================== دیتابیس ====================
 def create_default_market():
     return {
         "state": "normal",
@@ -294,14 +283,11 @@ def _migrate_user(u, gst):
         }
     for wk in ["planting", "harvest_sell"]:
         if wk in u["workers"]:
-            if "paused" not in u["workers"][wk]:
-                u["workers"][wk]["paused"] = False
-            if "paused_at" not in u["workers"][wk]:
-                u["workers"][wk]["paused_at"] = None
+            if "paused" not in u["workers"][wk]: u["workers"][wk]["paused"] = False
+            if "paused_at" not in u["workers"][wk]: u["workers"][wk]["paused_at"] = None
     u.pop("worker", None)
     if u.get("phoenix_owned") and u.get("pet", {}).get("name") == "ققنوس":
-        if "speed_value" not in u["pet"]:
-            u["pet"] = PHOENIX_PET
+        if "speed_value" not in u["pet"]: u["pet"] = PHOENIX_PET
     defaults = {
         "max_plots": 1, "current_fruit": 0, "pet": None, "phoenix_owned": False,
         "clan_id": None, "achievements": [], "pending_purchase": None,
@@ -311,8 +297,7 @@ def _migrate_user(u, gst):
         "market_holdings": {},
     }
     for k, v in defaults.items():
-        if k not in u:
-            u[k] = v
+        if k not in u: u[k] = v
 
 def load_data():
     with lock:
@@ -590,7 +575,6 @@ def get_land_price(cp):
     return LAND_PRICES[cp - 1]
 def is_banned(user_id): return str(user_id) in load_data().get("banned", [])
 
-# ==================== بازار: توابع ====================
 def update_market_prices():
     data = load_data()
     market = data.get("market")
@@ -598,31 +582,22 @@ def update_market_prices():
         market = create_default_market()
         data["market"] = market
         save_data(data); return
-    
     last_str = market.get("last_update")
     if not last_str:
         market["last_update"] = datetime.now().isoformat()
         save_data(data); return
-    
-    try:
-        last = datetime.fromisoformat(last_str)
+    try: last = datetime.fromisoformat(last_str)
     except:
         market["last_update"] = datetime.now().isoformat()
         save_data(data); return
-    
     elapsed = (datetime.now() - last).total_seconds()
     minutes = int(elapsed // 60)
     if minutes < 1: return
     minutes = min(minutes, 120)
-    
     for _ in range(minutes):
         for cid, cdata in market["currencies"].items():
-            base = cdata["base_price"]
-            price = cdata["price"]
-            mode = cdata.get("mode", "normal")
-            change = 0.0
-            new_price = price
-            
+            base = cdata["base_price"]; price = cdata["price"]
+            mode = cdata.get("mode", "normal"); change = 0.0; new_price = price
             if mode == "normal":
                 change = random.uniform(-5, 5) / 100
                 new_price = price * (1 + change)
@@ -631,22 +606,17 @@ def update_market_prices():
             elif mode == "loss":
                 change = random.uniform(-5, 0) / 100
                 new_price = price * (1 + change)
-                if new_price <= base:
-                    new_price = base; mode = "normal"
+                if new_price <= base: new_price = base; mode = "normal"
             else:
                 change = random.uniform(0, 5) / 100
                 new_price = price * (1 + change)
-                if new_price >= base:
-                    new_price = base; mode = "normal"
-            
+                if new_price >= base: new_price = base; mode = "normal"
             cdata["price"] = round(new_price, 4)
             cdata["mode"] = mode
             cdata["last_change"] = round(change * 100, 2)
-    
     market["last_update"] = datetime.now().isoformat()
     data["market"] = market
     save_data(data)
-
 
 def get_market_data():
     data = load_data()
@@ -657,11 +627,9 @@ def get_market_data():
         save_data(data)
     return market
 
-
 def get_market_state_fa(s):
     return {"normal": "عادی", "profit": "سود 📈", "loss": "ضرر 📉"}.get(s, "عادی")
 
-# ==================== پردازش کارگرها ====================
 def process_workers(user_id):
     data = load_data()
     user = data["users"].get(str(user_id))
@@ -670,7 +638,6 @@ def process_workers(user_id):
     now = datetime.now()
     changed = False
     effects, _ = get_season_effects()
-
     pw = workers.get("planting", {})
     if pw.get("active"):
         try:
@@ -697,7 +664,6 @@ def process_workers(user_id):
                             plot["harvest_time"] = ht.isoformat()
                             user["coins"] -= buy_price; changed = True
         except Exception as e: print(f"Worker planting error: {e}")
-
     hw = workers.get("harvest_sell", {})
     if hw.get("active"):
         try:
@@ -739,14 +705,12 @@ def process_workers(user_id):
                         if px > 0: xp += int(xp * px / 100)
                         user["coins"] += final_sp; user["xp"] += xp
                         while user["level"] < 7 and user["xp"] >= xp_needed_for(user["level"]):
-                            user["xp"] -= xp_needed_for(user["level"])
-                            user["level"] += 1
+                            user["xp"] -= xp_needed_for(user["level"]); user["level"] += 1
                         inv[fn] -= 1
                         if inv[fn] <= 0: del inv[fn]
                         user["inventory"] = inv; changed = True
                         break
         except Exception as e: print(f"Worker harvest error: {e}")
-
     if changed:
         user["workers"] = workers
         data["users"][str(user_id)] = user
@@ -1207,39 +1171,29 @@ async def cmd_market(message: Message):
     mode = p[1].lower()
     if mode not in ["profit", "normal", "loss"]:
         await message.answer("❌ استفاده: profit / normal / loss"); return
-    
     data = load_data()
     market = data.get("market", create_default_market())
-    
     if mode == "profit":
         for cid, cdata in market["currencies"].items():
             cdata["base_price"] = round(cdata["base_price"] * 1.15, 4)
             cdata["price"] = round(cdata["base_price"] * random.uniform(1.05, 1.2), 4)
-            cdata["mode"] = "normal"
-            cdata["last_change"] = 0.0
+            cdata["mode"] = "normal"; cdata["last_change"] = 0.0
         market["state"] = "profit"
     elif mode == "loss":
         for cid, cdata in market["currencies"].items():
             cdata["base_price"] = round(cdata["base_price"] * 0.85, 4)
             cdata["price"] = round(cdata["base_price"] * random.uniform(0.8, 0.95), 4)
-            cdata["mode"] = "normal"
-            cdata["last_change"] = 0.0
+            cdata["mode"] = "normal"; cdata["last_change"] = 0.0
         market["state"] = "loss"
-    else:  # normal
+    else:
         for cid, cdata in market["currencies"].items():
-            cdata["price"] = cdata["base_price"]
-            cdata["mode"] = "normal"
-            cdata["last_change"] = 0.0
+            cdata["price"] = cdata["base_price"]; cdata["mode"] = "normal"; cdata["last_change"] = 0.0
         market["state"] = "normal"
-    
     market["last_update"] = datetime.now().isoformat()
     data["market"] = market
     save_data(data)
-    
     avg_base = sum(c["base_price"] for c in market["currencies"].values()) / len(market["currencies"])
-    await message.answer(
-        f"✅ بازار در حالت **{get_market_state_fa(mode)}** قرار گرفت.\n"
-        f"💰 میانگین قیمت پایه: {avg_base:,.2f}")
+    await message.answer(f"✅ بازار در حالت **{get_market_state_fa(mode)}** قرار گرفت.\n💰 میانگین: {avg_base:,.2f}")
 
 # ==================== USER COMMANDS ====================
 @dp.message(CommandStart())
@@ -1248,9 +1202,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     if is_banned(user_id):
         await message.answer("🚫 You are banned."); return
-    check_all_harvests(user_id)
-    process_workers(user_id)
-    check_period_reset(user_id)
+    check_all_harvests(user_id); process_workers(user_id); check_period_reset(user_id)
     update_market_prices()
     user = get_user(user_id)
     if not user or user.get("name", "") == "":
@@ -1306,7 +1258,6 @@ async def process_name(message: Message, state: FSMContext):
     await message.answer(f"✅ نام '{name}' ثبت شد!")
     await show_main_menu(message)
 
-# ==================== هدیه ====================
 @dp.message(UserForm.gift_target)
 async def process_gift_target(message: Message, state: FSMContext):
     uid = message.from_user.id
@@ -1359,7 +1310,6 @@ async def process_gift_amount(message: Message, state: FSMContext):
     kb.adjust(2)
     await message.answer(text, reply_markup=kb.as_markup())
 
-# ==================== کلن ====================
 @dp.message(UserForm.clan_name)
 async def process_clan_name(message: Message, state: FSMContext):
     uid = message.from_user.id; user = get_user(uid)
@@ -1485,7 +1435,6 @@ async def process_clan_chat(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ پیام ارسال شد.", reply_markup=get_keyboard(uid))
 
-# ==================== کارگرها FSM ====================
 @dp.message(UserForm.worker_plant_hours)
 async def wp_hours_input(message: Message, state: FSMContext):
     uid = message.from_user.id
@@ -1544,7 +1493,6 @@ async def wh_hours_input(message: Message, state: FSMContext):
     kb.adjust(2)
     await message.answer(text, reply_markup=kb.as_markup())
 
-# ==================== بازار FSM ====================
 @dp.message(UserForm.market_buy_amount)
 async def market_buy_amount_input(message: Message, state: FSMContext):
     uid = message.from_user.id
@@ -1603,12 +1551,10 @@ async def market_sell_amount_input(message: Message, state: FSMContext):
     price = market["currencies"][cid]["price"]
     cur = MARKET_CURRENCIES[cid]
     total_value = h["amount"] * price
-    
     txt = message.text.strip().replace(",", "")
     if txt.lower() in ["همه", "all", "all."]:
         amount_currency = h["amount"]
         coins_to_get = int(round(total_value))
-        # اگه همه رو فروخت، دقیقاً همه
         final_all = True
     else:
         try:
@@ -1623,9 +1569,8 @@ async def market_sell_amount_input(message: Message, state: FSMContext):
             await message.answer(f"❌ بیشتر از ارزش دارایی‌ت نمی‌تونی بفروشی. ارزش فعلی: {format_coins(int(total_value))}",
                 reply_markup=get_keyboard(uid)); return
         amount_currency = coins / price
-        coins_to_get = int(round(coins))  # رند
+        coins_to_get = int(round(coins))
         final_all = False
-    
     await state.update_data(tr_type="market_sell", tr_cid=cid,
                              tr_sell_amount=amount_currency, tr_coins_get=coins_to_get,
                              tr_final_all=final_all)
@@ -1822,7 +1767,6 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         await state.clear(); return
     d = await state.get_data()
     tr_type = d.get("tr_type")
-    
     if tr_type == "gift":
         amt = d.get("tr_amount"); tid = d.get("tr_target_id"); tname = d.get("tr_target_name")
         if not tid or not amt:
@@ -1840,10 +1784,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_leaderboard(uid, user["name"], user["coins"] - amt, user["level"], user["prestige"])
         update_leaderboard(int(tid), target["name"], target["coins"] + amt, target["level"], target["prestige"])
         await state.clear()
-        await safe_edit(callback,
-            f"✅ **هدیه ارسال شد!**\n👤 {tname}\n💰 {format_coins(amt)}\n💼 {format_coins(user['coins'] - amt)}",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"✅ **هدیه ارسال شد!**\n👤 {tname}\n💰 {format_coins(amt)}\n💼 {format_coins(user['coins'] - amt)}", reply_markup=get_keyboard(uid))
     elif tr_type == "clan_donate":
         amt = d.get("tr_amount"); cid = d.get("tr_clan_id"); cname = d.get("tr_clan_name")
         if user["coins"] < amt:
@@ -1856,10 +1797,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         clan["treasury"] += amt; save_data(data)
         update_user(uid, {"coins": user["coins"] - amt})
         await state.clear()
-        await safe_edit(callback,
-            f"✅ **اهدا انجام شد!**\n🏰 {cname}\n💰 {format_coins(amt)}\n🏦 {format_coins(clan['treasury'])}",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"✅ **اهدا انجام شد!**\n🏰 {cname}\n💰 {format_coins(amt)}\n🏦 {format_coins(clan['treasury'])}", reply_markup=get_keyboard(uid))
     elif tr_type == "buy_land":
         mp = user.get("max_plots", 1)
         pr = get_land_price(mp)
@@ -1871,10 +1809,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_user(uid, {"coins": user["coins"] - pr, "plots": plots, "max_plots": mp + 1})
         update_leaderboard(uid, user["name"], user["coins"] - pr, user["level"], user["prestige"])
         await state.clear()
-        await safe_edit(callback,
-            f"🎉 **زمین {mp+1} خریداری شد!**\n💰 {format_coins(pr)}\n💼 {format_coins(user['coins'] - pr)}",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"🎉 **زمین {mp+1} خریداری شد!**\n💰 {format_coins(pr)}\n💼 {format_coins(user['coins'] - pr)}", reply_markup=get_keyboard(uid))
     elif tr_type == "upgrade":
         key = d.get("tr_key"); cnt = d.get("tr_count", 0); cost = d.get("tr_cost", 0)
         base = {"auto_water": 1000, "golden_pot": 2000, "professional_seeder": 5000}
@@ -1885,10 +1820,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_user(uid, {"coins": user["coins"] - cost, "upgrades": u})
         await state.clear()
         names = {"auto_water": "آبیاری خودکار", "golden_pot": "گلدان طلایی", "professional_seeder": "بذرپاش"}
-        await safe_edit(callback,
-            f"✅ **{names[key]}** ارتقاء یافت!\n💰 {format_coins(cost)}\n📈 تعداد: {cnt + 1}",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"✅ **{names[key]}** ارتقاء یافت!\n💰 {format_coins(cost)}\n📈 تعداد: {cnt + 1}", reply_markup=get_keyboard(uid))
     elif tr_type == "prestige":
         nx = user["prestige"] + 1
         p = PRESTIGE_PRICES.get(nx)
@@ -1908,10 +1840,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         data = load_data(); data["users"][str(uid)] = nu; save_data(data)
         update_leaderboard(uid, user["name"], 1, 1, nx)
         await state.clear()
-        await safe_edit(callback,
-            f"⭐ **تبریک! پرستیژ {nx}!**\nضریب جدید: {nu['prestige_multiplier']:.2f}x",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"⭐ **تبریک! پرستیژ {nx}!**\nضریب جدید: {nu['prestige_multiplier']:.2f}x", reply_markup=get_keyboard(uid))
     elif tr_type == "spin":
         et = d.get("tr_egg_type")
         if et not in PET_EGGS:
@@ -1928,11 +1857,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
         await state.clear()
         tfa = {"sell": "سود", "speed": "سرعت", "xp": "XP"}
-        await safe_edit(callback,
-            f"🥚 **{e['name']}** باز شد!\n\n{np['emoji']} **{np['name']}**\n"
-            f"قابلیت: +{np['value']}٪ {tfa[np['type']]}\n\n💰 {format_coins(nc)}",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"🥚 **{e['name']}** باز شد!\n\n{np['emoji']} **{np['name']}**\nقابلیت: +{np['value']}٪ {tfa[np['type']]}\n\n💰 {format_coins(nc)}", reply_markup=get_keyboard(uid))
     elif tr_type == "plant":
         pidx = d.get("tr_plot_idx"); fidx = d.get("tr_fruit_idx")
         if pidx is None or fidx is None:
@@ -1954,9 +1879,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_user(uid, {"coins": user["coins"] - bp, "plots": plots, "current_fruit": fidx})
         mi = int(gt); se = int((gt - mi) * 60)
         await state.clear()
-        await safe_edit(callback, f"🌱 {FRUITS[fidx]} کاشته شد!\n⏳ {mi}:{se:02d}",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"🌱 {FRUITS[fidx]} کاشته شد!\n⏳ {mi}:{se:02d}", reply_markup=get_keyboard(uid))
     elif tr_type == "worker_plant":
         fi = d.get("tr_fruit"); h = d.get("tr_hours"); cost = d.get("tr_cost", 0)
         if fi is None or h is None or user["coins"] < cost:
@@ -1968,10 +1891,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_user(uid, {"coins": user["coins"] - cost, "workers": workers})
         update_leaderboard(uid, user["name"], user["coins"] - cost, user["level"], user["prestige"])
         await state.clear()
-        await safe_edit(callback,
-            f"✅ **کارگر کاشت اجاره شد!**\n🍎 {FRUITS[fi]}\n⏰ {h} ساعت\n💰 {format_coins(cost)}",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"✅ **کارگر کاشت اجاره شد!**\n🍎 {FRUITS[fi]}\n⏰ {h} ساعت\n💰 {format_coins(cost)}", reply_markup=get_keyboard(uid))
     elif tr_type == "worker_harvest":
         h = d.get("tr_hours")
         if h is None:
@@ -1981,10 +1901,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         workers["harvest_sell"] = {"active": True, "hours": h, "expires_at": expires.isoformat(), "paused": False, "paused_at": None}
         update_user(uid, {"workers": workers})
         await state.clear()
-        await safe_edit(callback,
-            f"✅ **کارگر برداشت و فروش اجاره شد!**\n⏰ {h} ساعت\n📊 کمیسیون ۲۰٪",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"✅ **کارگر برداشت و فروش اجاره شد!**\n⏰ {h} ساعت\n📊 کمیسیون ۲۰٪", reply_markup=get_keyboard(uid))
     elif tr_type == "clan_disband":
         cid = user.get("clan_id")
         if not cid:
@@ -1999,7 +1916,6 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         del data["clans"][cid]; save_data(data)
         await state.clear()
         await safe_edit(callback, "🗑 کلن منحل شد.", reply_markup=get_keyboard(uid))
-    
     elif tr_type == "clan_leave":
         cid = user.get("clan_id")
         if not cid:
@@ -2014,7 +1930,6 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_user(uid, {"clan_id": None})
         await state.clear()
         await safe_edit(callback, "🚪 از کلن خارج شدی.", reply_markup=get_keyboard(uid))
-    
     elif tr_type == "clan_upgrade":
         cid = user.get("clan_id")
         cost = d.get("tr_cost", 0); nx = d.get("tr_next_level", 1)
@@ -2028,7 +1943,23 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         data["clans"][cid] = clan; save_data(data)
         await state.clear()
         await safe_edit(callback, f"✅ کلن به لول {nx} ارتقاء یافت!", reply_markup=get_keyboard(uid))
-    
+    elif tr_type == "buy_shop":
+        amount = d.get("tr_amount"); coins = d.get("tr_coins")
+        if not amount or not coins:
+            await state.clear(); return
+        await state.clear()
+        await safe_edit(callback, "✅ اطلاعات خرید ثبت شد. در حال انتقال به درگاه...", reply_markup=get_keyboard(uid))
+        r = amount * 10
+        if amount == 70000:
+            pl = f"shop_{amount}_{coins}_phoenix"; ti = "ققنوس"; de = f"{format_coins(coins)}+🦅"
+        else:
+            pl = f"shop_{amount}_{coins}"; ti = format_coins(coins); de = f"{amount:,} تومان"
+        try:
+            await bot.send_invoice(chat_id=uid, title=ti, description=de, payload=pl,
+                                    provider_token=PROVIDER_TOKEN, currency="IRR",
+                                    prices=[{"label": format_coins(coins), "amount": r}])
+        except Exception as e:
+            print(f"Invoice error: {e}")
     elif tr_type == "market_buy":
         cid = d.get("tr_cid"); coins = d.get("tr_coins", 0)
         if not cid or cid not in MARKET_CURRENCIES or coins <= 0:
@@ -2049,14 +1980,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_leaderboard(uid, user["name"], user["coins"] - coins, user["level"], user["prestige"])
         cur = MARKET_CURRENCIES[cid]
         await state.clear()
-        await safe_edit(callback,
-            f"✅ **خرید موفق!**\n\n"
-            f"{cur['emoji']} {cur['name']}\n"
-            f"💰 سرمایه: {format_coins(coins)}\n"
-            f"📦 مقدار: **{amount_currency:.4f}**\n"
-            f"📊 قیمت: {format_market_price(price)}",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"✅ **خرید موفق!**\n\n{cur['emoji']} {cur['name']}\n💰 سرمایه: {format_coins(coins)}\n📦 مقدار: **{amount_currency:.4f}**\n📊 قیمت: {format_market_price(price)}", reply_markup=get_keyboard(uid))
     elif tr_type == "market_sell":
         cid = d.get("tr_cid")
         sell_amount = d.get("tr_sell_amount", 0)
@@ -2070,29 +1994,18 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         if not h or h.get("amount", 0) <= 0:
             await state.clear()
             await safe_edit(callback, "❌ خطا.", reply_markup=get_keyboard(uid)); return
-        # کسر از دارایی
         if final_all:
-            # همه رو بفروش
             del holdings[cid]
         else:
             h["amount"] = h.get("amount", 0) - sell_amount
-            if h["amount"] <= 0.0001:
-                del holdings[cid]
-            else:
-                holdings[cid] = h
+            if h["amount"] <= 0.0001: del holdings[cid]
+            else: holdings[cid] = h
         nc = user["coins"] + coins_get
         update_user(uid, {"coins": nc, "market_holdings": holdings})
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
         cur = MARKET_CURRENCIES[cid]
         await state.clear()
-        await safe_edit(callback,
-            f"✅ **فروش موفق!**\n\n"
-            f"{cur['emoji']} {cur['name']}\n"
-            f"📦 مقدار فروش: **{sell_amount:.4f}**\n"
-            f"💰 دریافت: **{format_coins(coins_get)}**\n"
-            f"💼 موجودی جدید: {format_coins(nc)}",
-            reply_markup=get_keyboard(uid))
-    
+        await safe_edit(callback, f"✅ **فروش موفق!**\n\n{cur['emoji']} {cur['name']}\n📦 مقدار فروش: **{sell_amount:.4f}**\n💰 دریافت: **{format_coins(coins_get)}**\n💼 موجودی جدید: {format_coins(nc)}", reply_markup=get_keyboard(uid))
     else:
         await state.clear()
         await safe_edit(callback, "❌ خطا.", reply_markup=get_keyboard(uid))
@@ -2162,11 +2075,9 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     if is_banned(uid): return
     raw_data = callback.data or ""
-    
     cur_state = await state.get_state()
     if cur_state is not None and raw_data not in ["confirm_yes", "confirm_no", "wp_cancel", "wh_cancel"] and not raw_data.startswith("clan_accept_") and not raw_data.startswith("clan_reject_") and not raw_data.startswith("clan_req_") and not raw_data.startswith("market_cid_") and not raw_data.startswith("market_sell_cid_"):
         await state.clear()
-    
     if raw_data.startswith("owner_"):
         parts = raw_data.split("_", 2)
         owner_id = parts[1]
@@ -2180,13 +2091,10 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         if raw_data in ["confirm_yes", "confirm_no", "wp_cancel", "wh_cancel"]: return
         if raw_data.startswith("clan_accept_") or raw_data.startswith("clan_reject_") or raw_data.startswith("clan_req_"): return
         data = raw_data
-    
     check_all_harvests(uid); process_workers(uid); check_period_reset(uid)
     update_market_prices()
     user = get_user(uid)
     if not user: return
-    
-    # ===== بازار: انتخاب ارز برای خرید =====
     if data.startswith("market_cid_"):
         cid = data.replace("market_cid_", "")
         if cid not in MARKET_CURRENCIES:
@@ -2204,8 +2112,6 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             f"❌ برای لغو /cancel بزن.",
             reply_markup=get_keyboard(uid))
         return
-    
-    # ===== بازار: انتخاب ارز برای فروش =====
     if data.startswith("market_sell_cid_"):
         cid = data.replace("market_sell_cid_", "")
         if cid not in MARKET_CURRENCIES:
@@ -2230,7 +2136,6 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             f"❌ برای لغو /cancel بزن.",
             reply_markup=get_keyboard(uid))
         return
-    
     if data == "noop": return
     elif data == "status": await edit_status(callback, user, uid)
     elif data == "admin_panel": await show_admin_panel(callback, uid)
@@ -2238,6 +2143,9 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     elif data == "market_asset": await show_market_asset_menu(callback, user, uid)
     elif data == "lands_menu": await show_lands_menu(callback, user, uid)
     elif data == "inventory_menu": await show_inventory(callback, user, uid)
+    # ✅ این دو خط باید قبل از buy_startswith باشند:
+    elif data == "buy_prestige":
+        await buy_prestige(callback, user, uid, state)
     elif data == "buy_land":
         mp = user.get("max_plots", 1)
         pr = get_land_price(mp)
@@ -2255,6 +2163,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         kb.button("❌ لغو", callback_data="confirm_no")
         kb.adjust(2)
         await safe_edit(callback, text, reply_markup=kb.as_markup())
+    # ✅ بعد از این دو، buy_ عمومی:
     elif data.startswith("buy_"):
         try: idx = int(data.split("_")[1])
         except ValueError: return
@@ -2306,7 +2215,6 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             reply_markup=get_keyboard(uid))
     elif data == "gift": await start_gift(callback, user, uid, state)
     elif data == "prestige_menu": await show_prestige(callback, user, uid)
-    elif data == "buy_prestige": await buy_prestige(callback, user, uid, state)
     elif data == "pet_menu": await show_pet_menu(callback, user, uid)
     elif data.startswith("spin_"):
         await do_spin(callback, user, uid, data.replace("spin_", ""), state)
@@ -2441,14 +2349,12 @@ async def show_main_menu(message: Message):
 async def edit_status(callback, user, uid):
     await safe_edit(callback, build_status_text(user, uid), reply_markup=get_keyboard(uid))
 
-# ==================== بازار: نمایش ====================
 async def show_market_menu(callback, user, uid):
     update_market_prices()
     market = get_market_data()
     prefix = f"owner_{uid}_"
     state = market.get("state", "normal")
     state_fa = get_market_state_fa(state)
-    
     text = "💹 **بازار کشاورزی**\n\n"
     text += f"📊 وضعیت بازار: **{state_fa}**\n\n"
     for cid, cur in MARKET_CURRENCIES.items():
@@ -2459,9 +2365,7 @@ async def show_market_menu(callback, user, uid):
         elif last_ch < -0.01: arrow = "📉"
         else: arrow = "➡️"
         text += f"{cur['emoji']} **{cur['name']}**: {format_market_price(price)} سکه  {arrow} {last_ch:+.2f}%\n"
-    
     text += "\n💡 روی هر ارز بزن تا بخری، یا «دارایی بازار» رو بزن تا بفروشی."
-    
     kb = InlineKeyboardBuilder()
     kb.button(f"{MARKET_CURRENCIES['millet']['emoji']} ارزن", callback_data=f"{prefix}market_cid_millet")
     kb.button(f"{MARKET_CURRENCIES['alfalfa']['emoji']} یونجه", callback_data=f"{prefix}market_cid_alfalfa")
@@ -2479,13 +2383,11 @@ async def show_market_asset_menu(callback, user, uid):
     prefix = f"owner_{uid}_"
     holdings = user.get("market_holdings", {})
     text = "💼 **دارایی بازار شما**\n\n"
-    
     has_any = False
     buttons = []
     for cid, cur in MARKET_CURRENCIES.items():
         h = holdings.get(cid)
-        if not h or h.get("amount", 0) <= 0:
-            continue
+        if not h or h.get("amount", 0) <= 0: continue
         has_any = True
         price = market["currencies"][cid]["price"]
         amount = h.get("amount", 0)
@@ -2502,20 +2404,12 @@ async def show_market_asset_menu(callback, user, uid):
                  f"   💵 سرمایه: {format_coins(int(invested))}\n"
                  f"   {emoji} سود/ضرر: {format_coins(int(profit))} ({profit_pct:+.2f}%)\n\n")
         buttons.append((cid, cur))
-    
-    if not has_any:
-        text += "هنوز چیزی نخریدی!"
-    
+    if not has_any: text += "هنوز چیزی نخریدی!"
     kb = InlineKeyboardBuilder()
     for cid, cur in buttons:
         kb.button(f"{cur['emoji']} {cur['name']}", callback_data=f"{prefix}market_sell_cid_{cid}")
     kb.button("🔙 بازار", callback_data=f"{prefix}market_menu")
-    if buttons:
-        # تنظیم در چند ردیف
-        row_count = min(2, len(buttons))
-        kb.adjust(*([2] * (len(buttons) // 2 + (1 if len(buttons) % 2 else 0))), 1)
-    else:
-        kb.adjust(1)
+    kb.adjust(2)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
 async def show_lands_menu(callback, user, uid):
@@ -2675,14 +2569,12 @@ async def show_upgrades(callback, user, uid):
             f"   خریداری شده: {u.get('golden_pot',0)} بار\n\n"
             f"🌱 **بذرپاش حرفه‌ای**: **{format_coins(c3)}**\n"
             f"   خریداری شده: {u.get('professional_seeder',0)} بار\n")
-    if lp:
-        text += f"\n🏞️ **خرید زمین {mp+1}:** **{format_coins(lp)}**"
+    if lp: text += f"\n🏞️ **خرید زمین {mp+1}:** **{format_coins(lp)}**"
     kb = InlineKeyboardBuilder()
     kb.button(f"💧 آبیاری ({format_coins(c1)})", callback_data=f"{prefix}upgrade_auto_water")
     kb.button(f"🏺 گلدان ({format_coins(c2)})", callback_data=f"{prefix}upgrade_golden_pot")
     kb.button(f"🌱 بذرپاش ({format_coins(c3)})", callback_data=f"{prefix}upgrade_professional_seeder")
-    if lp:
-        kb.button(f"🏞️ خرید زمین ({format_coins(lp)})", callback_data=f"{prefix}buy_land")
+    if lp: kb.button(f"🏞️ خرید زمین ({format_coins(lp)})", callback_data=f"{prefix}buy_land")
     kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(1)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
@@ -2958,13 +2850,10 @@ async def do_spin(callback, user, uid, et, state):
 async def show_clan_menu(callback, user, uid):
     prefix = f"owner_{uid}_"
     clan_id = user.get("clan_id")
-    
-    # ✅ اگه clan_id داره ولی کلن وجود نداره، پاکش کن
     if clan_id and not get_clan(clan_id):
         update_user(uid, {"clan_id": None})
         user = get_user(uid)
         clan_id = None
-    
     if not clan_id:
         text = (f"🏰 **بدون کلن**\n\n"
                 f"💰 ساخت کلن: {format_coins(CLAN_CREATE_COST)}\n\n"
@@ -2982,7 +2871,6 @@ async def show_clan_info(callback, user, uid):
     c = get_clan(user["clan_id"])
     prefix = f"owner_{uid}_"
     if not c: 
-        # اگه کلن نیست، clan_id رو پاک کن
         update_user(uid, {"clan_id": None})
         user = get_user(uid)
         await show_clan_menu(callback, user, uid); return
