@@ -823,7 +823,7 @@ async def main():
     
     # توقف خودکار بعد از ۴ دقیقه تا اجرای بعدی بدون تداخل شروع شود
     async def stop_after_delay():
-        await asyncio.sleep(4 * 60)
+        await asyncio.sleep(340 * 60)  # ۳۴۰ دقیقه = ۵ ساعت و ۴۰ دقیقه
         print("⏰ زمان اجرا تمام شد. توقف ربات...")
         try:
             await dp.stop_polling()
