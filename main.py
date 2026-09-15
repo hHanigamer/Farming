@@ -8,12 +8,12 @@ import sys
 from datetime import datetime
 from filelock import FileLock
 
-from baleio import Bot, Dispatcher, F, md
+from baleio import Bot, Dispatcher, md
 from baleio.client.default import DefaultBotProperties
 from baleio.enums import ParseMode
 from baleio.filters import Command, CommandStart
 from baleio.fsm import FSMContext, State, StatesGroup
-from baleio.types import Message, CallbackQuery, PreCheckoutQuery
+from baleio.types import Message, CallbackQuery
 from baleio.utils import InlineKeyboardBuilder
 
 # ==================== تنظیمات ====================
@@ -503,7 +503,10 @@ async def grow_complete(user_id, chat_id, minutes, bot):
     user = get_user(user_id)
     if user and user["state"] == "growing":
         update_user(user_id, {"state": "harvested"})
-        await bot.send_message(chat_id, f"🍓 {FRUITS[user['current_fruit']]} رسید! بفروشش.", reply_markup=get_keyboard(user_id))
+        try:
+            await bot.send_message(chat_id, f"🍓 {FRUITS[user['current_fruit']]} رسید! بفروشش.", reply_markup=get_keyboard(user_id))
+        except Exception:
+            pass
 
 async def sell_fruit(callback: CallbackQuery, user):
     user_id = callback.from_user.id
@@ -793,16 +796,26 @@ async def buy_prestige(callback: CallbackQuery, user):
         reply_markup=get_keyboard(user_id)
     )
 
-# ==================== پیش‌پرداخت ====================
-@dp.pre_checkout_query()
-async def pre_checkout(query: PreCheckoutQuery):
-    await query.answer(ok=True)
-
 # ==================== اجرا ====================
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     print("🤖 ربات فارمینگ بله روشن شد...")
-    await dp.start_polling(bot)
+    
+    # توقف خودکار بعد از ۴ دقیقه تا اجرای بعدی بدون تداخل شروع شود
+    async def stop_after_delay():
+        await asyncio.sleep(4 * 60)
+        print("⏰ زمان اجرا تمام شد. توقف ربات...")
+        try:
+            await dp.stop_polling()
+        except Exception as e:
+            print(f"خطا در توقف: {e}")
+    
+    asyncio.create_task(stop_after_delay())
+    
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        print(f"ربات متوقف شد: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
