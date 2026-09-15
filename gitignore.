@@ -1,0 +1,19 @@
+# دیتابیس بازی (خودکار ساخته می‌شود)
+data.json
+data_backup.json
+data.lock
+
+# فایل‌های پایتون
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# محیط مجازی
+venv/
+env/
+.env
+
+# فایل‌های سیستم
+.DS_Store
+Thumbs.db
