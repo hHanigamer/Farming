@@ -52,7 +52,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           PROVIDER_TOKEN: ${{ secrets.PROVIDER_TOKEN }}
-
+          ADMIN_ID: ${{ secrets.ADMIN_ID }}
       - name: Save data to data-storage branch
         if: always()
         run: |
