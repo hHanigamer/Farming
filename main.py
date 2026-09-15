@@ -47,6 +47,10 @@ LEVEL_UNLOCKS = {
     7: {"fruits": [0, 1, 2, 3, 4, 5, 6], "features": ["status", "pet", "leaderboard", "upgrades", "daily_orders", "shop", "worker", "clan", "gift", "prestige", "league"]},
 }
 
+ALL_FEATURES = ["status", "pet", "leaderboard", "upgrades", "daily_orders",
+                "shop", "worker", "clan", "gift", "prestige", "league"]
+ALL_FRUITS = [0, 1, 2, 3, 4, 5, 6]
+
 PRESTIGE_PRICES = {1: 50_000_000_000, 2: 100_000_000_000, 3: 200_000_000_000,
                    4: 500_000_000_000, 5: 725_000_000_000, 6: 1_000_000_000_000,
                    7: 1_500_000_000_000, 8: 2_500_000_000_000,
@@ -164,7 +168,6 @@ def _ensure_keys(data):
     return data
 
 def _migrate_user(u, game_start_time):
-    """اضافه کردن فیلدهای جدید به کاربران قدیمی"""
     if "period_start_coins" not in u:
         u["period_start_coins"] = 1
     if "period_start_time" not in u:
@@ -195,7 +198,6 @@ def load_data():
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             data = _ensure_keys(data)
-            # Migration کاربران قدیمی
             gst = data.get("game_start_time", datetime.now().isoformat())
             for uid, u in data.get("users", {}).items():
                 _migrate_user(u, gst)
@@ -355,44 +357,30 @@ def get_period_number():
     return get_week_number(start_str)
 
 def process_period_end(period_num, user, user_id_str):
-    """پردازش پایان یه دوره و اعطای جایزه به این کاربر"""
     if user.get("level", 1) < 7 and user.get("prestige", 0) == 0:
         return
-    
     prestige = user.get("prestige", 0)
     league_key = str(prestige)
-    
     data = load_data()
     leagues = data.get("leagues", {})
     period_key = f"period_{period_num}"
-    
     if league_key not in leagues:
         return
     if period_key not in leagues[league_key]:
         return
-    
     league_data = leagues[league_key][period_key]
     members = league_data.get("members", {})
-    
     if user_id_str not in members:
         return
-    
     total = len(members)
     if total == 0:
         return
-    
     sorted_members = sorted(members.items(), key=lambda x: x[1].get("profit", 0), reverse=True)
-    
     if total < 10:
         rank = next((i+1 for i, (uid, _) in enumerate(sorted_members) if uid == user_id_str), 0)
         if rank > 0:
-            ach = {
-                "type": "lone_eagle",
-                "rank": rank,
-                "period": period_num,
-                "league": prestige,
-                "date": datetime.now().strftime("%Y-%m-%d"),
-            }
+            ach = {"type": "lone_eagle", "rank": rank, "period": period_num,
+                   "league": prestige, "date": datetime.now().strftime("%Y-%m-%d")}
             if "achievements" not in user:
                 user["achievements"] = []
             user["achievements"].append(ach)
@@ -402,13 +390,8 @@ def process_period_end(period_num, user, user_id_str):
             return
         percent = max(1, int((rank / total) * 100))
         if percent <= 10:
-            ach = {
-                "type": "top_percent",
-                "percent": percent,
-                "period": period_num,
-                "league": prestige,
-                "date": datetime.now().strftime("%Y-%m-%d"),
-            }
+            ach = {"type": "top_percent", "percent": percent, "period": period_num,
+                   "league": prestige, "date": datetime.now().strftime("%Y-%m-%d")}
             if "achievements" not in user:
                 user["achievements"] = []
             user["achievements"].append(ach)
@@ -419,12 +402,10 @@ def check_period_reset(user_id):
     user = data["users"].get(str(user_id))
     if not user:
         return False
-    
     last_period = user.get("last_seen_period", current_period)
     if current_period > last_period:
         for p in range(last_period, current_period):
             process_period_end(p, user, str(user_id))
-        
         user["period_start_coins"] = user["coins"]
         user["period_start_time"] = datetime.now().isoformat()
         user["current_period"] = current_period
@@ -437,12 +418,10 @@ def check_period_reset(user_id):
 def update_league_profit(user_id, user, profit):
     if user.get("level", 1) < 7 and user.get("prestige", 0) == 0:
         return
-    
     prestige = user.get("prestige", 0)
     league_key = str(prestige)
     period_num = user.get("current_period", 1)
     period_key = f"period_{period_num}"
-    
     data = load_data()
     if "leagues" not in data:
         data["leagues"] = {}
@@ -453,7 +432,6 @@ def update_league_profit(user_id, user, profit):
             "started_at": user.get("period_start_time"),
             "members": {}
         }
-    
     data["leagues"][league_key][period_key]["members"][str(user_id)] = {
         "name": user.get("name", "?"),
         "profit": profit,
@@ -462,13 +440,16 @@ def update_league_profit(user_id, user, profit):
 
 # ==================== توابع کمکی ====================
 def get_available_fruits(user):
+    # ✅ اگه پرستیژ بالای ۰ داره، همه‌ی میوه‌ها بازه
+    if user.get("prestige", 0) > 0:
+        return ALL_FRUITS
     return LEVEL_UNLOCKS.get(user["level"], LEVEL_UNLOCKS[7])["fruits"]
 
 def get_available_features(user):
-    feats = list(LEVEL_UNLOCKS.get(user["level"], LEVEL_UNLOCKS[7])["features"])
-    if user.get("prestige", 0) > 0 and "league" not in feats:
-        feats.append("league")
-    return feats
+    # ✅ اگه پرستیژ بالای ۰ داره، همه‌ی ویژگی‌ها بازه
+    if user.get("prestige", 0) > 0:
+        return ALL_FEATURES
+    return LEVEL_UNLOCKS.get(user["level"], LEVEL_UNLOCKS[7])["features"]
 
 def has_feature(user, feature):
     return feature in get_available_features(user)
@@ -548,26 +529,33 @@ def build_status_text(user, user_id):
     profit = user["coins"] - user.get("period_start_coins", 1)
     period_num = user.get("current_period", 1)
     
+    # --- بخش اصلی ---
     text = (
         f"📊 **وضعیت {user['name']}:**\n"
         f"💰 سکه: {user['coins']:,}\n"
         f"📈 لول: {user['level']} | XP: {user['xp']}/{xp_needed_for(user['level'])}\n"
-        f"⭐ پرستیژ: {user['prestige']} | ضریب: {multiplier:.2f}x\n"
         f"🌤 فصل: {SEASON_FA[season]}\n"
-        f"💵 سود دوره {period_num}: {profit:,}\n"
     )
     
-    # پت (از لول ۱ بازه)
+    # --- پرستیژ (فقط از لول ۷ یا پرستیژ ۱+) ---
+    if "prestige" in features:
+        text += f"⭐ پرستیژ: {user['prestige']} | ضریب: {multiplier:.2f}x\n"
+    
+    # --- سود دوره (فقط اگه لیگ باز شده) ---
+    if "league" in features:
+        text += f"💵 سود دوره {period_num}: {profit:,}\n"
+    
+    # --- پت ---
     if "pet" in features:
         pet = user.get("pet")
         pet_text = f"{pet['emoji']} {pet['name']}" if pet else "ندارد"
         text += f"🐾 پت: {pet_text}\n"
     
-    # کارگر (از لول ۵)
+    # --- کارگر ---
     if "worker" in features:
         text += f"👷 کارگر: لول {user['worker']['level']} ({'فعال' if user['worker']['active'] else 'غیرفعال'})\n"
     
-    # کلن (از لول ۵)
+    # --- کلن ---
     if "clan" in features:
         if user.get("clan_id"):
             clan = get_clan(user["clan_id"])
@@ -576,11 +564,11 @@ def build_status_text(user, user_id):
         else:
             text += f"🏰 کلن: بدون کلن\n"
     
-    # هدیه (از لول ۶)
+    # --- هدیه ---
     if "gift" in features:
         text += f"🎁 هدیه: داده {user.get('gifts_given',0)} | گرفته {user.get('gifts_received',0)}\n"
     
-    # لیگ (از لول ۷ یا پرستیژ ۱+)
+    # --- لیگ ---
     if "league" in features:
         rank = get_user_league_rank(user_id, user)
         text += f"🏅 رتبه لیگ: {rank}\n"
@@ -604,16 +592,13 @@ def get_user_league_rank(user_id, user):
     league_key = str(prestige)
     period_num = user.get("current_period", 1)
     period_key = f"period_{period_num}"
-    
     data = load_data()
     leagues = data.get("leagues", {})
     if league_key not in leagues or period_key not in leagues[league_key]:
         return "—"
-    
     members = leagues[league_key][period_key].get("members", {})
     if str(user_id) not in members:
         return "—"
-    
     sorted_members = sorted(members.items(), key=lambda x: x[1].get("profit", 0), reverse=True)
     for i, (uid, _) in enumerate(sorted_members, 1):
         if uid == str(user_id):
@@ -1073,7 +1058,7 @@ async def complete_orders(callback, user, user_id):
 
 async def show_shop(callback, user, user_id):
     level = user["level"]
-    if level < 4:
+    if level < 4 and user.get("prestige", 0) == 0:
         await callback.message.edit_text("🔒 فروشگاه در لول ۴ باز می‌شود.", reply_markup=get_keyboard(user_id)); return
     prices = SHOP_PRICES.get(level, SHOP_PRICES[7])
     text = "🛒 **فروشگاه سکه**\n\n💰 با توجه به لول شما، مقدار سکه‌ها متفاوت است.\n\n"
@@ -1093,7 +1078,8 @@ async def show_shop(callback, user, user_id):
     await callback.message.edit_text(text, reply_markup=kb.as_markup())
 
 async def buy_shop(callback, user, user_id, amount):
-    prices = SHOP_PRICES.get(user["level"], SHOP_PRICES[7])
+    level = user["level"] if user.get("prestige", 0) == 0 else 7
+    prices = SHOP_PRICES.get(level, SHOP_PRICES[7])
     if amount not in prices: return
     coins = prices[amount]
     inv = user.get("inventory", [])
@@ -1145,7 +1131,7 @@ async def show_prestige(callback, user, user_id):
     price = PRESTIGE_PRICES[nxt]
     text = (f"⭐ **پرستیژ {nxt}**\nهزینه: {price:,}\n"
             f"ضریب جدید: {user['prestige_multiplier']*1.5:.2f}x\n\n"
-            f"⚠️ همه چیز ریست می‌شود (به‌جز نام و پرستیژ)")
+            f"⚠️ همه چیز ریست می‌شود (به‌جز نام، پرستیژ و کلن)")
     kb = InlineKeyboardBuilder()
     kb.button(f"⭐ خرید ({price:,})", callback_data="buy_prestige")
     kb.button("🔙", callback_data="back")
@@ -1166,6 +1152,7 @@ async def buy_prestige(callback, user, user_id):
     new_user["gifts_given"] = user.get("gifts_given", 0)
     new_user["gifts_received"] = user.get("gifts_received", 0)
     new_user["achievements"] = user.get("achievements", [])
+    new_user["clan_id"] = user.get("clan_id")  # ✅ کلن حفظ می‌شه
     new_user["last_seen_period"] = get_period_number()
     new_user["current_period"] = get_period_number()
     data = load_data()
@@ -1198,14 +1185,11 @@ async def do_spin(callback, user, user_id, egg_type):
     egg = PET_EGGS[egg_type]
     if user["coins"] < egg["price"]:
         await callback.message.edit_text(f"❌ نیاز به {egg['price']:,} سکه.", reply_markup=get_keyboard(user_id)); return
-    
     new_pet = spin_egg(egg_type)
     if not new_pet: return
-    
     new_coins = user["coins"] - egg["price"]
     update_user(user_id, {"coins": new_coins, "pet": new_pet})
     update_leaderboard(user_id, user["name"], new_coins, user["level"], user["prestige"])
-    
     type_fa = {"sell": "سود بیشتر", "speed": "رشد سریع‌تر", "xp": "XP بیشتر"}
     await callback.message.edit_text(
         f"🥚 **{egg['name']}** باز شد!\n\n"
@@ -1308,7 +1292,6 @@ async def show_league_menu(callback, user, user_id):
     league_name = LEAGUE_FA.get(prestige, "?")
     profit = user["coins"] - user.get("period_start_coins", 1)
     rank = get_user_league_rank(user_id, user)
-    
     data = load_data()
     start_str = data.get("game_start_time")
     if start_str:
@@ -1323,7 +1306,6 @@ async def show_league_menu(callback, user, user_id):
             remaining_text = "به‌زودی..."
     else:
         remaining_text = "?"
-    
     text = (f"🏅 **لیگ {league_name}** — دوره {period_num}\n\n"
             f"💵 سود شما در این دوره: {profit:,}\n"
             f"📊 رتبه شما: {rank}\n"
