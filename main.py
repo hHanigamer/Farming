@@ -5,7 +5,6 @@ import shutil
 import asyncio
 import logging
 import sys
-import hashlib
 from datetime import datetime, timedelta
 from filelock import FileLock
 
@@ -36,7 +35,6 @@ DATA_DIR = "data"
 USERS_DIR = os.path.join(DATA_DIR, "users")
 CLANS_DIR = os.path.join(DATA_DIR, "clans")
 GLOBAL_FILE = os.path.join(DATA_DIR, "global.json")
-BACKUP_DIR = "data_backups"
 LOCK_FILE = "data.lock"
 lock = FileLock(LOCK_FILE, timeout=10)
 
@@ -313,33 +311,6 @@ def _read_json(path):
         return None
 
 
-def _try_migrate_from_legacy():
-    """اگه data.json قدیمی بود، به split تبدیل کن"""
-    if not os.path.exists("data.json"):
-        return None
-    try:
-        with open("data.json", "r", encoding="utf-8") as f:
-            old = json.load(f)
-    except Exception:
-        return None
-    print("📦 Migrating legacy data.json to split storage...")
-    # بنویس
-    _ensure_dirs()
-    for uid, u in old.get("users", {}).items():
-        _write_json(os.path.join(USERS_DIR, f"{uid}.json"), u)
-    for cid, c in old.get("clans", {}).items():
-        _write_json(os.path.join(CLANS_DIR, f"{cid}.json"), c)
-    global_data = {k: old.get(k) for k in GLOBAL_KEYS}
-    _write_json(GLOBAL_FILE, global_data)
-    # بکاپ
-    try:
-        os.rename("data.json", "data_legacy_backup.json")
-    except Exception:
-        pass
-    print("✅ Migration done. Old file renamed to data_legacy_backup.json")
-    return old
-
-
 def create_default_market():
     return {
         "state": "normal",
@@ -454,7 +425,6 @@ def _migrate_user(u, gst):
         for k, v in default_bank.items():
             if k not in u["bank"]:
                 u["bank"][k] = v
-    # migrate daily_orders
     do = u.get("daily_orders", {})
     if isinstance(do, dict):
         if "completed_at" not in do:
@@ -482,10 +452,21 @@ def load_data():
     with lock:
         _ensure_dirs()
 
-        # تلاش برای migrate از فایل قدیمی
+        # GitHub Actions: اگه data.json هست، migrate کن (بدون پاک کردن)
         if (not os.path.exists(GLOBAL_FILE) and not os.listdir(USERS_DIR)
                 and os.path.exists("data.json")):
-            _try_migrate_from_legacy()
+            try:
+                with open("data.json", "r", encoding="utf-8") as f:
+                    old = json.load(f)
+                for uid, u in old.get("users", {}).items():
+                    _write_json(os.path.join(USERS_DIR, f"{uid}.json"), u)
+                for cid, c in old.get("clans", {}).items():
+                    _write_json(os.path.join(CLANS_DIR, f"{cid}.json"), c)
+                global_data = {k: old.get(k) for k in GLOBAL_KEYS}
+                _write_json(GLOBAL_FILE, global_data)
+                print(f"📦 Loaded from data.json ({len(old.get('users', {}))} users)")
+            except Exception as e:
+                print(f"❌ Migration error: {e}")
 
         global_data = _read_json(GLOBAL_FILE) or {}
 
@@ -520,7 +501,6 @@ def load_data():
         for uid, u in data.get("users", {}).items():
             _migrate_user(u, gst)
 
-        # snapshot برای diff
         _LAST_USER_JSON = {}
         for uid, u in data["users"].items():
             try:
@@ -545,7 +525,6 @@ def load_data():
 
 
 def save_data(data):
-    """فقط توی حافظه تغییر می‌ده و trigger رو روشن می‌کنه"""
     global _DATA_CACHE, _DATA_DIRTY, _SAVE_TRIGGER
     _DATA_CACHE = _ensure_keys(data)
     _DATA_DIRTY = True
@@ -558,14 +537,12 @@ def save_data(data):
 
 
 def _write_to_disk():
-    """نوشتن توی فایل‌های split — فقط چیزایی که عوض شدن"""
     global _DATA_DIRTY, _LAST_USER_JSON, _LAST_CLAN_JSON, _LAST_GLOBAL_JSON
     if _DATA_CACHE is None or not _DATA_DIRTY:
         return
     with lock:
         data = _DATA_CACHE
 
-        # Global
         try:
             global_snap = {k: data.get(k) for k in GLOBAL_KEYS}
             global_json = json.dumps(global_snap, ensure_ascii=False, sort_keys=True)
@@ -575,7 +552,6 @@ def _write_to_disk():
         except Exception as e:
             print(f"global write error: {e}")
 
-        # Users
         for uid, u in data.get("users", {}).items():
             try:
                 uj = json.dumps(u, ensure_ascii=False, sort_keys=True)
@@ -585,7 +561,6 @@ def _write_to_disk():
                 _write_json(os.path.join(USERS_DIR, f"{uid}.json"), u)
                 _LAST_USER_JSON[uid] = uj
 
-        # Clans
         for cid, c in data.get("clans", {}).items():
             try:
                 cj = json.dumps(c, ensure_ascii=False, sort_keys=True)
@@ -598,8 +573,25 @@ def _write_to_disk():
         _DATA_DIRTY = False
 
 
+def merge_to_single_file():
+    """همه split files رو توی data.json جمع می‌کنه (برای git push)"""
+    data = load_data()
+    single = {}
+    for k in GLOBAL_KEYS:
+        single[k] = data.get(k)
+    single["users"] = data.get("users", {})
+    single["clans"] = data.get("clans", {})
+    try:
+        with open("data.json", "w", encoding="utf-8") as f:
+            json.dump(single, f, ensure_ascii=False, separators=(",", ":"))
+        print(f"✅ Merged: {len(single['users'])} users, {len(single['clans'])} clans")
+        return True
+    except Exception as e:
+        print(f"❌ Merge error: {e}")
+        return False
+
+
 async def saver_loop():
-    """هر بار trigger → ۰.۳ ثانیه صبر → نوشتن"""
     global _SAVE_TRIGGER
     _SAVE_TRIGGER = asyncio.Event()
     while True:
@@ -616,8 +608,18 @@ async def saver_loop():
                 print(f"❌ saver error: {e}")
 
 
+async def sync_to_single_loop():
+    """هر ۱۰ دقیقه data.json محلی رو آپدیت کن"""
+    await asyncio.sleep(600)
+    while True:
+        try:
+            await asyncio.to_thread(merge_to_single_file)
+        except Exception as e:
+            print(f"❌ Sync error: {e}")
+        await asyncio.sleep(600)
+
+
 def trim_old_data():
-    """پاک کردن دیتای قدیمی"""
     data = load_data()
     now = datetime.now()
     changed = False
@@ -658,34 +660,6 @@ def trim_old_data():
 
     if changed:
         save_data(data)
-
-
-async def daily_backup_loop():
-    """هر ۲۴ ساعت یه بکاپ می‌گیره"""
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    while True:
-        try:
-            await asyncio.sleep(24 * 3600)
-            date_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
-            backup_path = os.path.join(BACKUP_DIR, f"backup_{date_str}")
-            os.makedirs(backup_path, exist_ok=True)
-            if os.path.exists(GLOBAL_FILE):
-                shutil.copy(GLOBAL_FILE, os.path.join(backup_path, "global.json"))
-            if os.path.isdir(USERS_DIR):
-                shutil.copytree(USERS_DIR, os.path.join(backup_path, "users"), dirs_exist_ok=True)
-            if os.path.isdir(CLANS_DIR):
-                shutil.copytree(CLANS_DIR, os.path.join(backup_path, "clans"), dirs_exist_ok=True)
-            print(f"✅ Backup: {backup_path}")
-            # پاک کردن بکاپ‌های قدیمی (بیشتر از ۷ تا)
-            backups = sorted(os.listdir(BACKUP_DIR))
-            while len(backups) > 7:
-                old = backups.pop(0)
-                try:
-                    shutil.rmtree(os.path.join(BACKUP_DIR, old))
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"❌ backup error: {e}")
 
 
 # ==================== توابع کمکی ====================
@@ -1095,7 +1069,6 @@ def get_sell_bonus(user):
 
 # ==================== بانک ====================
 def update_bank_interest(user_id):
-    """سود یک کاربر — برای فراخوانی مستقیم"""
     data = load_data()
     user = data["users"].get(str(user_id))
     if not user:
@@ -1341,7 +1314,6 @@ def process_workers(user_id):
                 hw["paused_at"] = None
                 changed = True
             else:
-                # برداشت
                 for plot in user.get("plots", []):
                     if plot["state"] != "harvested":
                         continue
@@ -1355,7 +1327,6 @@ def process_workers(user_id):
                     plot["state"] = "idle"
                     plot["harvest_time"] = None
                     changed = True
-                # فروش (چند تا در هر بار)
                 inv = user.get("inventory", {})
                 sold_count = 0
                 MAX_PER_CALL = 50
@@ -1721,7 +1692,7 @@ async def cmd_admin(message: Message):
     market = get_market_data()
     avg_base = sum(c["base_price"] for c in market["currencies"].values()) / len(market["currencies"])
     text = ("👑 **پنل ادمین**\n\n"
-            "**User Management:**\n"
+            "**User:**\n"
             "`/user_info <id>` | `/give_coins <id> <amt>`\n"
             "`/set_coins <id> <amt>` | `/set_level <id> <lv>`\n"
             "`/set_xp <id> <xp>` | `/set_prestige <id> <p>`\n"
@@ -1735,7 +1706,7 @@ async def cmd_admin(message: Message):
             "`/giftcode <amt> <all|num> <h> <code>`\n\n"
             "**Market:**\n"
             "`/market profit` | `/market normal` | `/market loss`\n\n"
-            f"💰 میانگین قیمت پایه: **{avg_base:,.2f}**")
+            f"💰 میانگین پایه: **{avg_base:,.2f}**")
     await message.answer(text)
 
 
@@ -2080,7 +2051,7 @@ async def cmd_market(message: Message):
         avg_base = sum(c["base_price"] for c in market["currencies"].values()) / len(market["currencies"])
         await message.answer(
             f"💹 **مدیریت بازار**\n\n"
-            f"💰 میانگین قیمت پایه: **{avg_base:,.2f}**\n\n"
+            f"💰 میانگین پایه: **{avg_base:,.2f}**\n\n"
             f"`/market profit` — صعودی (+۰.۵٪ در دقیقه)\n"
             f"`/market normal` — توقف\n"
             f"`/market loss` — نزولی (-۰.۰۵٪ در دقیقه)")
@@ -2096,7 +2067,7 @@ async def cmd_market(message: Message):
     save_data(data)
     avg_base = sum(c["base_price"] for c in market["currencies"].values()) / len(market["currencies"])
     note = {"profit": "📈 صعودی", "loss": "📉 نزولی", "normal": "⏸ توقف"}[mode]
-    await message.answer(f"✅ بازار: **{note}**\n💰 میانگین فعلی: {avg_base:,.2f}")
+    await message.answer(f"✅ بازار: **{note}**\n💰 میانگین: {avg_base:,.2f}")
 
 
 # ==================== USER COMMANDS ====================
@@ -2170,7 +2141,7 @@ async def process_name(message: Message, state: FSMContext):
     bank["account_number"] = acc
     update_user(uid, {"name": name, "bank": bank})
     await state.clear()
-    await message.answer(f"✅ نام '{name}' ثبت شد!\n🏦 شماره حساب شما: `{acc}`")
+    await message.answer(f"✅ نام '{name}' ثبت شد!\n🏦 شماره حساب: `{acc}`")
     await show_main_menu(message)
 
 
@@ -2190,7 +2161,7 @@ async def bank_deposit_amount_input(message: Message, state: FSMContext):
             raise ValueError
     except Exception:
         await state.clear()
-        await message.answer("❌ عدد مثبت. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ عدد مثبت.", reply_markup=get_keyboard(uid)); return
     if user["coins"] < coins:
         await state.clear()
         await message.answer(f"❌ موجودی: {format_coins(user['coins'])}", reply_markup=get_keyboard(uid)); return
@@ -2198,8 +2169,7 @@ async def bank_deposit_amount_input(message: Message, state: FSMContext):
     final_amount = coins - commission
     await state.update_data(tr_type="bank_deposit", tr_amount=coins, tr_final=final_amount, tr_commission=commission)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🏦 **تأیید سپرده‌گذاری**\n\n"
-            f"💰 مبلغ: **{format_coins(coins)}**\n"
+    text = (f"🏦 **تأیید سپرده**\n\n💰 **{format_coins(coins)}**\n"
             f"📊 کمیسیون ۵٪: **{format_coins(commission)}**\n"
             f"✅ واریز: **{format_coins(final_amount)}**\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
@@ -2234,7 +2204,7 @@ async def bank_withdraw_amount_input(message: Message, state: FSMContext):
         await message.answer(f"❌ موجودی بانک: {format_coins(bank.get('balance', 0))}", reply_markup=get_keyboard(uid)); return
     await state.update_data(tr_type="bank_withdraw", tr_amount=coins)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🏦 **تأیید برداشت**\n\n💰 مبلغ: **{format_coins(coins)}**\n\n⚠️ مطمئنی؟")
+    text = (f"🏦 **تأیید برداشت**\n\n💰 **{format_coins(coins)}**\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -2293,8 +2263,8 @@ async def bank_transfer_amount_input(message: Message, state: FSMContext):
     await state.update_data(tr_type="bank_transfer", tr_target_id=tid,
                              tr_target_name=tname, tr_amount=coins, tr_acc=acc)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🏦 **تأیید انتقال**\n\n👤 به: **{tname}**\n🆔 حساب: `{acc}`\n"
-            f"💰 مبلغ: **{format_coins(coins)}**\n"
+    text = (f"🏦 **تأیید انتقال**\n\n👤 به: **{tname}**\n🆔 `{acc}`\n"
+            f"💰 **{format_coins(coins)}**\n"
             f"💼 بعد: {format_coins(bank.get('balance', 0) - coins)}\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
@@ -2356,11 +2326,11 @@ async def bank_loan_hours_input(message: Message, state: FSMContext):
         await state.clear(); return
     try:
         hours = int(message.text.strip())
-        if hours <= 0 or hours > 72:
+        if hours < 1 or hours > 72:
             raise ValueError
     except Exception:
         await state.clear()
-        await message.answer("❌ عدد بین ۱ تا ۷۲.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ عدد صحیح بین ۱ تا ۷۲ ساعت.", reply_markup=get_keyboard(uid)); return
     period_end = get_period_end_datetime(user.get("current_period", 1))
     if period_end:
         loan_end = datetime.now() + timedelta(hours=hours)
@@ -2373,8 +2343,8 @@ async def bank_loan_hours_input(message: Message, state: FSMContext):
     await state.update_data(tr_type="bank_loan", tr_amount=amount,
                              tr_hours=hours, tr_total_due=total_due)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🏦 **تأیید وام**\n\n💰 مبلغ: **{format_coins(amount)}**\n"
-            f"⏰ مدت: **{hours} ساعت**\n📈 سود: ۴۰٪ هر ۳۰ دقیقه\n"
+    text = (f"🏦 **تأیید وام**\n\n💰 **{format_coins(amount)}**\n"
+            f"⏰ **{hours} ساعت**\n📈 سود: ۴۰٪ هر ۳۰ دقیقه\n"
             f"💵 بازپرداخت: **{format_coins(total_due)}**\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
@@ -2387,7 +2357,7 @@ async def bank_loan_hours_input(message: Message, state: FSMContext):
 async def cancel_on_unexpected(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
-    await message.answer("❌ **عملیات لغو شد.**", reply_markup=get_keyboard(uid))
+    await message.answer("❌ **لغو شد.**", reply_markup=get_keyboard(uid))
 
 
 # ==================== FSM: WORKER ====================
@@ -2490,11 +2460,11 @@ async def process_clan_search(message: Message, state: FSMContext):
             found_cid = cid
             break
     if not found_clan:
-        await message.answer(f"❌ پیدا نشد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ پیدا نشد.", reply_markup=get_keyboard(uid)); return
     if len(found_clan["members"]) >= CLAN_MAX_MEMBERS.get(found_clan["level"], 10):
         await message.answer("❌ پره.", reply_markup=get_keyboard(uid)); return
     if str(uid) in found_clan["members"]:
-        await message.answer("قبلاً عضو هستی.", reply_markup=get_keyboard(uid)); return
+        await message.answer("قبلاً عضو.", reply_markup=get_keyboard(uid)); return
     text = (f"🏰 **کلن پیدا شد!**\n\n📛 {found_clan['name']}\n"
             f"📊 لول: {found_clan['level']}\n"
             f"👥 {len(found_clan['members'])}/{CLAN_MAX_MEMBERS.get(found_clan['level'],10)}\n"
@@ -3011,7 +2981,6 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         workers[wk] = {"active": False, "fruit": None, "hours": 0, "expires_at": None, "paused": False, "paused_at": None}
         update_user(uid, {"workers": workers})
         await state.clear()
-        name = "کاشت" if wk == "planting" else "برداشت/فروش"
         await safe_edit(callback, f"🚪 اخراج شد.", reply_markup=get_keyboard(uid))
     elif tr_type == "clan_disband":
         cid = user.get("clan_id")
@@ -3274,7 +3243,6 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     if not user:
         return
 
-    # jail check
     if user.get("bank", {}).get("in_jail") and not data.startswith("jail_"):
         bank = user.get("bank", {})
         jail_until_str = bank.get("jail_until")
@@ -3334,7 +3302,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             f"📦 {h['amount']:.4f}\n"
             f"📊 {format_market_price(price)}\n"
             f"💰 ارزش: **{format_coins(int(total_value))}**\n\n"
-            f"مقدار سکه یا «همه» رو بفرست.\n❌ /cancel",
+            f"مقدار سکه یا «همه»:\n❌ /cancel",
             reply_markup=get_keyboard(uid))
         return
 
@@ -3460,6 +3428,8 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         await harvest_plot(callback, user, uid, idx)
     elif data.startswith("sell_inv_"):
         await sell_from_inventory(callback, user, uid, data.replace("sell_inv_", ""))
+    elif data == "sell_all_inv":
+        await sell_all_inventory(callback, user, uid)
     elif data.startswith("plant_plot_"):
         p = data.split("_")
         try:
@@ -3932,6 +3902,7 @@ async def show_inventory(callback, user, uid):
             else:
                 text += f"🍎 {fn}: {cnt}\n"
                 kb.button(f"💰 فروش {fn}", callback_data=f"{prefix}sell_inv_{fn}")
+        kb.button("💰 فروش همه انبار", callback_data=f"{prefix}sell_all_inv")
     kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(2)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
@@ -3994,21 +3965,15 @@ async def harvest_plot(callback, user, uid, idx):
     await safe_edit(callback, f"📦 {fn} به انبار!", reply_markup=get_keyboard(uid))
 
 
-async def sell_from_inventory(callback, user, uid, fn):
-    inv = user.get("inventory", {})
-    if inv.get(fn, 0) < 1:
-        await safe_edit(callback, "❌", reply_markup=get_keyboard(uid)); return
+def _calc_sale(user, fn, effects):
+    """محاسبه فروش یک آیتم از انبار — return (coins, xp, is_golden_chance)"""
     is_golden = fn.startswith("طلایی_")
     real_name = fn.replace("طلایی_", "") if is_golden else fn
     try:
         cf = FRUITS.index(real_name)
     except Exception:
-        await safe_edit(callback, "❌", reply_markup=get_keyboard(uid)); return
-    inv[fn] -= 1
-    if inv[fn] <= 0:
-        del inv[fn]
-    eff, _ = get_season_effects()
-    bs = int(PRICES[cf][1] * user["prestige_multiplier"] * eff["sell_mult"])
+        return None
+    bs = int(PRICES[cf][1] * user["prestige_multiplier"] * effects["sell_mult"])
     if is_golden:
         bs *= GOLDEN_MULT
     sp = bs
@@ -4022,15 +3987,30 @@ async def sell_from_inventory(callback, user, uid, fn):
         sp = int(sp * get_sell_bonus(user))
     g = False
     if not is_golden:
-        g = random.random() < eff["golden_chance"]
+        g = random.random() < effects["golden_chance"]
         if g:
             sp *= 2
-    xp = int(xp_from_sale(real_name) * user["prestige_multiplier"] * eff["xp_mult"])
+    xp = int(xp_from_sale(real_name) * user["prestige_multiplier"] * effects["xp_mult"])
     if is_golden:
         xp *= GOLDEN_MULT
     px = get_pet_effect(user, "xp")
     if px > 0:
         xp += int(xp * px / 100)
+    return sp, xp, g, is_golden
+
+
+async def sell_from_inventory(callback, user, uid, fn):
+    inv = user.get("inventory", {})
+    if inv.get(fn, 0) < 1:
+        await safe_edit(callback, "❌", reply_markup=get_keyboard(uid)); return
+    eff, _ = get_season_effects()
+    result = _calc_sale(user, fn, eff)
+    if not result:
+        await safe_edit(callback, "❌", reply_markup=get_keyboard(uid)); return
+    sp, xp, g, is_golden = result
+    inv[fn] -= 1
+    if inv[fn] <= 0:
+        del inv[fn]
     nc = user["coins"] + sp
     nx = user["xp"] + xp
     nl = user["level"]
@@ -4046,6 +4026,7 @@ async def sell_from_inventory(callback, user, uid, fn):
     upd = get_user(uid)
     update_league_profit(uid, upd, upd["coins"] - upd.get("period_start_coins", 1))
     if is_golden:
+        real_name = fn.replace("طلایی_", "")
         await safe_edit(callback,
             f"✨ **{real_name} طلایی فروخته شد!**\n💰 +{format_coins(sp)}\n⭐ +{xp}\n📈 {nl}{lu}",
             reply_markup=get_keyboard(uid))
@@ -4054,6 +4035,63 @@ async def sell_from_inventory(callback, user, uid, fn):
         await safe_edit(callback,
             f"✅ {fn}{gt}\n💰 +{format_coins(sp)}\n⭐ +{xp}\n📈 {nl}{lu}",
             reply_markup=get_keyboard(uid))
+
+
+async def sell_all_inventory(callback, user, uid):
+    inv = user.get("inventory", {})
+    if not inv:
+        await safe_edit(callback, "📦 انبار خالیه!", reply_markup=get_keyboard(uid)); return
+    eff, _ = get_season_effects()
+    total_coins = 0
+    total_xp = 0
+    sold_items = {}
+    golden_count = 0
+    normal_count = 0
+    for fn, cnt in list(inv.items()):
+        if cnt <= 0:
+            continue
+        result = _calc_sale(user, fn, eff)
+        if not result:
+            continue
+        sp_one, xp_one, _, is_golden = result
+        # همه رو با هم حساب کن (به جای loop)
+        total_coins += sp_one * cnt
+        total_xp += xp_one * cnt
+        if is_golden:
+            golden_count += cnt
+            real_name = fn.replace("طلایی_", "")
+            sold_items[real_name + " ✨"] = sold_items.get(real_name + " ✨", 0) + cnt
+        else:
+            normal_count += cnt
+            sold_items[fn] = sold_items.get(fn, 0) + cnt
+    if total_coins == 0 and total_xp == 0:
+        await safe_edit(callback, "❌ چیزی برای فروش نیست.", reply_markup=get_keyboard(uid)); return
+    inv = {}
+    nc = user["coins"] + total_coins
+    nx = user["xp"] + total_xp
+    nl = user["level"]
+    lu = ""
+    xn = xp_needed_for(nl)
+    while nx >= xn and nl < 7:
+        nx -= xn
+        nl += 1
+        xn = xp_needed_for(nl)
+        lu = f"\n🎉 لول {nl}!"
+    update_user(uid, {"coins": nc, "xp": nx, "level": nl, "inventory": inv})
+    update_leaderboard(uid, user["name"], nc, nl, user["prestige"])
+    upd = get_user(uid)
+    update_league_profit(uid, upd, upd["coins"] - upd.get("period_start_coins", 1))
+    # ساخت خلاصه
+    lines = []
+    for name, cnt in sold_items.items():
+        lines.append(f"• {name}: {cnt}")
+    summary = "\n".join(lines[:10])
+    if len(lines) > 10:
+        summary += f"\n• ... و {len(lines) - 10} آیتم دیگه"
+    await safe_edit(callback,
+        f"✅ **فروش همه انبار!**\n\n{summary}\n\n"
+        f"💰 **+{format_coins(total_coins)}**\n⭐ **+{total_xp} XP**\n📈 لول {nl}{lu}",
+        reply_markup=get_keyboard(uid))
 
 
 async def switch_fruit(callback, user, uid, idx):
@@ -4670,8 +4708,9 @@ async def main():
         try:
             if _DATA_DIRTY:
                 await asyncio.to_thread(_write_to_disk)
-        except Exception:
-            pass
+            await asyncio.to_thread(merge_to_single_file)
+        except Exception as e:
+            print(f"Final merge error: {e}")
         try:
             await dp.stop_polling()
         except Exception:
@@ -4679,10 +4718,10 @@ async def main():
 
     asyncio.create_task(stop_delay())
     asyncio.create_task(saver_loop())
+    asyncio.create_task(sync_to_single_loop())
     asyncio.create_task(bank_interest_loop())
     asyncio.create_task(loan_check_loop())
     asyncio.create_task(trim_loop())
-    asyncio.create_task(daily_backup_loop())
 
     try:
         await dp.start_polling(bot)
@@ -4691,6 +4730,7 @@ async def main():
         try:
             if _DATA_DIRTY:
                 await asyncio.to_thread(_write_to_disk)
+            await asyncio.to_thread(merge_to_single_file)
         except Exception:
             pass
 
