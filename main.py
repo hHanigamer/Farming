@@ -44,6 +44,7 @@ _SAVE_TRIGGER = None
 _LAST_USER_JSON = {}
 _LAST_CLAN_JSON = {}
 _LAST_GLOBAL_JSON = ""
+_MODIFIED_USERS = set()
 
 GLOBAL_KEYS = ["game_start_time", "first_run_time", "leaderboard", "leagues",
                "active_event", "gift_codes", "banned", "clan_requests", "market"]
@@ -372,6 +373,7 @@ def create_default_user(user_id):
         "achievements": [], "pending_purchase": None, "used_gift_codes": [],
         "market_holdings": {},
         "bank": create_default_bank(),
+        "last_activity": now,
     }
 
 
@@ -432,12 +434,15 @@ def _migrate_user(u, gst):
         if "next_at" not in do:
             do["next_at"] = None
         u["daily_orders"] = do
+    if "last_activity" not in u:
+        u["last_activity"] = u.get("period_start_time", gst)
     defaults = {
         "max_plots": 1, "current_fruit": 0, "pet": None, "phoenix_owned": False,
         "clan_id": None, "achievements": [], "pending_purchase": None,
         "period_start_coins": 1, "period_start_time": gst,
         "current_period": 1, "last_seen_period": 1,
         "used_gift_codes": [], "market_holdings": {},
+        "last_activity": gst,
     }
     for k, v in defaults.items():
         if k not in u:
@@ -452,7 +457,6 @@ def load_data():
     with lock:
         _ensure_dirs()
 
-        # GitHub Actions: اگه data.json هست، migrate کن (بدون پاک کردن)
         if (not os.path.exists(GLOBAL_FILE) and not os.listdir(USERS_DIR)
                 and os.path.exists("data.json")):
             try:
@@ -537,7 +541,7 @@ def save_data(data):
 
 
 def _write_to_disk():
-    global _DATA_DIRTY, _LAST_USER_JSON, _LAST_CLAN_JSON, _LAST_GLOBAL_JSON
+    global _DATA_DIRTY, _LAST_USER_JSON, _LAST_CLAN_JSON, _LAST_GLOBAL_JSON, _MODIFIED_USERS
     if _DATA_CACHE is None or not _DATA_DIRTY:
         return
     with lock:
@@ -552,7 +556,12 @@ def _write_to_disk():
         except Exception as e:
             print(f"global write error: {e}")
 
-        for uid, u in data.get("users", {}).items():
+        modified = list(_MODIFIED_USERS)
+        for uid in modified:
+            u = data.get("users", {}).get(uid)
+            if not u:
+                _MODIFIED_USERS.discard(uid)
+                continue
             try:
                 uj = json.dumps(u, ensure_ascii=False, sort_keys=True)
             except Exception:
@@ -560,6 +569,7 @@ def _write_to_disk():
             if uj != _LAST_USER_JSON.get(uid):
                 _write_json(os.path.join(USERS_DIR, f"{uid}.json"), u)
                 _LAST_USER_JSON[uid] = uj
+            _MODIFIED_USERS.discard(uid)
 
         for cid, c in data.get("clans", {}).items():
             try:
@@ -574,7 +584,6 @@ def _write_to_disk():
 
 
 def merge_to_single_file():
-    """همه split files رو توی data.json جمع می‌کنه (برای git push)"""
     data = load_data()
     single = {}
     for k in GLOBAL_KEYS:
@@ -609,7 +618,6 @@ async def saver_loop():
 
 
 async def sync_to_single_loop():
-    """⭐ هر ۳۰ ثانیه data.json محلی رو آپدیت کن (برای امنیت دیتا)"""
     await asyncio.sleep(30)
     while True:
         try:
@@ -618,6 +626,26 @@ async def sync_to_single_loop():
         except Exception as e:
             print(f"❌ Sync error: {e}")
         await asyncio.sleep(30)
+
+
+async def market_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await asyncio.to_thread(update_market_prices)
+        except Exception as e:
+            print(f"❌ Market loop: {e}")
+        await asyncio.sleep(60)
+
+
+async def user_process_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await asyncio.to_thread(process_all_users)
+        except Exception as e:
+            print(f"❌ User process loop: {e}")
+        await asyncio.sleep(60)
 
 
 def trim_old_data():
@@ -669,11 +697,14 @@ def get_user(user_id):
 
 
 def update_user(user_id, updates):
+    global _MODIFIED_USERS
     data = load_data()
     uid_str = str(user_id)
     if uid_str not in data["users"]:
         data["users"][uid_str] = create_default_user(user_id)
     data["users"][uid_str].update(updates)
+    data["users"][uid_str]["last_activity"] = datetime.now().isoformat()
+    _MODIFIED_USERS.add(uid_str)
     save_data(data)
 
 
@@ -1262,16 +1293,10 @@ def get_market_state_fa(s):
     return {"normal": "عادی", "profit": "سود 📈", "loss": "ضرر 📉"}.get(s, "عادی")
 
 
-# ==================== کارگرها ====================
-def process_workers(user_id):
-    data = load_data()
-    user = data["users"].get(str(user_id))
-    if not user:
-        return
+# ==================== کارگرها (نسخه داخلی برای process_all_users) ====================
+def _process_workers_for_user(user, now, effects):
     workers = user.get("workers", {})
-    now = datetime.now()
     changed = False
-    effects, _ = get_season_effects()
     pw = workers.get("planting", {})
     if pw.get("active") and not pw.get("paused"):
         try:
@@ -1304,6 +1329,7 @@ def process_workers(user_id):
                         changed = True
         except Exception as e:
             print(f"Worker plant error: {e}")
+
     hw = workers.get("harvest_sell", {})
     if hw.get("active") and not hw.get("paused"):
         try:
@@ -1328,6 +1354,7 @@ def process_workers(user_id):
                     plot["state"] = "idle"
                     plot["harvest_time"] = None
                     changed = True
+
                 inv = user.get("inventory", {})
                 sold_count = 0
                 MAX_PER_CALL = 50
@@ -1375,12 +1402,88 @@ def process_workers(user_id):
                     sold_count += 1
         except Exception as e:
             print(f"Worker harvest error: {e}")
+
+    return changed
+
+
+def process_workers(user_id):
+    data = load_data()
+    user = data["users"].get(str(user_id))
+    if not user:
+        return
+    now = datetime.now()
+    effects, _ = get_season_effects()
+    changed = _process_workers_for_user(user, now, effects)
     if changed:
-        user["workers"] = workers
+        user["workers"] = user.get("workers", {})
         save_data(data)
         update_leaderboard(user_id, user["name"], user["coins"], user["level"], user["prestige"])
         profit = user["coins"] - user.get("period_start_coins", 1)
         update_league_profit(user_id, user, profit)
+
+
+def process_all_users():
+    """پردازش همه کاربرای فعال — فقط کسایی که چیز در حال انجام دارن"""
+    global _MODIFIED_USERS
+    data = load_data()
+    now = datetime.now()
+    cutoff = now - timedelta(hours=24)
+    effects, _ = get_season_effects()
+    any_changed = False
+    processed = 0
+    skipped = 0
+
+    for uid, user in data.get("users", {}).items():
+        try:
+            last_act = user.get("last_activity")
+            if last_act:
+                try:
+                    if datetime.fromisoformat(last_act) < cutoff:
+                        skipped += 1
+                        continue
+                except Exception:
+                    pass
+
+            has_growing = any(p.get("state") == "growing" for p in user.get("plots", []))
+            pw = user.get("workers", {}).get("planting", {})
+            hw = user.get("workers", {}).get("harvest_sell", {})
+            has_worker = (pw.get("active") and not pw.get("paused")) or \
+                         (hw.get("active") and not hw.get("paused"))
+
+            if not has_growing and not has_worker:
+                skipped += 1
+                continue
+
+            processed += 1
+            changed = False
+
+            for plot in user.get("plots", []):
+                if plot.get("state") == "growing":
+                    ht = plot.get("harvest_time")
+                    if ht:
+                        try:
+                            if now >= datetime.fromisoformat(ht):
+                                plot["state"] = "harvested"
+                                plot["harvest_time"] = None
+                                changed = True
+                        except Exception:
+                            pass
+
+            worker_changed = _process_workers_for_user(user, now, effects)
+            if worker_changed:
+                changed = True
+
+            if changed:
+                _MODIFIED_USERS.add(uid)
+                any_changed = True
+
+        except Exception as e:
+            print(f"❌ Process error {uid}: {e}")
+
+    if any_changed:
+        save_data(data)
+    if processed > 0 or skipped > 0:
+        print(f"✅ Process: {processed} active, {skipped} skipped at {now.strftime('%H:%M')}")
 
 
 # ==================== توابع کمکی پیام ====================
@@ -4715,6 +4818,8 @@ async def main():
     asyncio.create_task(stop_delay())
     asyncio.create_task(saver_loop())
     asyncio.create_task(sync_to_single_loop())
+    asyncio.create_task(market_loop())
+    asyncio.create_task(user_process_loop())
     asyncio.create_task(bank_interest_loop())
     asyncio.create_task(loan_check_loop())
     asyncio.create_task(trim_loop())
