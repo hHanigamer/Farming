@@ -3966,7 +3966,6 @@ async def harvest_plot(callback, user, uid, idx):
 
 
 def _calc_sale(user, fn, effects):
-    """محاسبه فروش یک آیتم از انبار — return (coins, xp, is_golden_chance)"""
     is_golden = fn.startswith("طلایی_")
     real_name = fn.replace("طلایی_", "") if is_golden else fn
     try:
@@ -4045,8 +4044,6 @@ async def sell_all_inventory(callback, user, uid):
     total_coins = 0
     total_xp = 0
     sold_items = {}
-    golden_count = 0
-    normal_count = 0
     for fn, cnt in list(inv.items()):
         if cnt <= 0:
             continue
@@ -4054,19 +4051,15 @@ async def sell_all_inventory(callback, user, uid):
         if not result:
             continue
         sp_one, xp_one, _, is_golden = result
-        # همه رو با هم حساب کن (به جای loop)
         total_coins += sp_one * cnt
         total_xp += xp_one * cnt
         if is_golden:
-            golden_count += cnt
             real_name = fn.replace("طلایی_", "")
             sold_items[real_name + " ✨"] = sold_items.get(real_name + " ✨", 0) + cnt
         else:
-            normal_count += cnt
             sold_items[fn] = sold_items.get(fn, 0) + cnt
     if total_coins == 0 and total_xp == 0:
         await safe_edit(callback, "❌ چیزی برای فروش نیست.", reply_markup=get_keyboard(uid)); return
-    inv = {}
     nc = user["coins"] + total_coins
     nx = user["xp"] + total_xp
     nl = user["level"]
@@ -4077,11 +4070,10 @@ async def sell_all_inventory(callback, user, uid):
         nl += 1
         xn = xp_needed_for(nl)
         lu = f"\n🎉 لول {nl}!"
-    update_user(uid, {"coins": nc, "xp": nx, "level": nl, "inventory": inv})
+    update_user(uid, {"coins": nc, "xp": nx, "level": nl, "inventory": {}})
     update_leaderboard(uid, user["name"], nc, nl, user["prestige"])
     upd = get_user(uid)
     update_league_profit(uid, upd, upd["coins"] - upd.get("period_start_coins", 1))
-    # ساخت خلاصه
     lines = []
     for name, cnt in sold_items.items():
         lines.append(f"• {name}: {cnt}")
@@ -4701,6 +4693,10 @@ async def main():
 
     load_data()
     print("✅ Data loaded")
+
+    # ⭐ این ۲ خط حیاتی — data.json رو فوراً می‌سازه
+    await asyncio.to_thread(merge_to_single_file)
+    print("✅ Initial merge done")
 
     async def stop_delay():
         await asyncio.sleep(340 * 60)
