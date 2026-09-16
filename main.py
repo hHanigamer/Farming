@@ -609,14 +609,15 @@ async def saver_loop():
 
 
 async def sync_to_single_loop():
-    """هر ۱۰ دقیقه data.json محلی رو آپدیت کن"""
-    await asyncio.sleep(600)
+    """⭐ هر ۳۰ ثانیه data.json محلی رو آپدیت کن (برای امنیت دیتا)"""
+    await asyncio.sleep(30)
     while True:
         try:
-            await asyncio.to_thread(merge_to_single_file)
+            if _DATA_DIRTY:
+                await asyncio.to_thread(merge_to_single_file)
         except Exception as e:
             print(f"❌ Sync error: {e}")
-        await asyncio.sleep(600)
+        await asyncio.sleep(30)
 
 
 def trim_old_data():
@@ -4694,7 +4695,6 @@ async def main():
     load_data()
     print("✅ Data loaded")
 
-    # ⭐ این ۲ خط حیاتی — data.json رو فوراً می‌سازه
     await asyncio.to_thread(merge_to_single_file)
     print("✅ Initial merge done")
 
