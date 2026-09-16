@@ -5,6 +5,7 @@ import shutil
 import asyncio
 import logging
 import sys
+import hashlib
 from datetime import datetime, timedelta
 from filelock import FileLock
 
@@ -30,15 +31,31 @@ PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN", "WALLET-TEST-1111111111111111")
 ADMIN_IDS_STR = os.getenv("ADMIN_ID", "0")
 ADMIN_IDS = [int(x.strip()) for x in ADMIN_IDS_STR.split(",") if x.strip().isdigit()]
 
-DATA_FILE = "data.json"
-BACKUP_FILE = "data_backup.json"
+# ==================== دیتابیس split ====================
+DATA_DIR = "data"
+USERS_DIR = os.path.join(DATA_DIR, "users")
+CLANS_DIR = os.path.join(DATA_DIR, "clans")
+GLOBAL_FILE = os.path.join(DATA_DIR, "global.json")
+BACKUP_DIR = "data_backups"
 LOCK_FILE = "data.lock"
 lock = FileLock(LOCK_FILE, timeout=10)
 
+_DATA_CACHE = None
+_DATA_DIRTY = False
+_SAVE_TRIGGER = None
+_LAST_USER_JSON = {}
+_LAST_CLAN_JSON = {}
+_LAST_GLOBAL_JSON = ""
+
+GLOBAL_KEYS = ["game_start_time", "first_run_time", "leaderboard", "leagues",
+               "active_event", "gift_codes", "banned", "clan_requests", "market"]
+
+# ==================== ثابت‌های بازی ====================
 FRUITS = ["توت‌فرنگی", "گوجه", "سیب", "پرتقال", "نارگیل", "آناناس", "میوه اژدها"]
 PRICES = [(1, 3), (15, 38), (304, 760), (9120, 22800),
           (456000, 1140000), (27360000, 68400000), (2052000000, 5130000000)]
 GROWTH_TIMES = [1, 2.5, 4, 5.5, 7, 8.5, 10]
+GOLDEN_MULT = 10
 
 XP_REQUIRED = {1: 5, 2: 30, 3: 75, 4: 250, 5: 1000, 6: 5000}
 XP_FROM_SALES = {"توت‌فرنگی": (1, 1), "گوجه": (2, 3), "سیب": (4, 6),
@@ -53,7 +70,6 @@ LEVEL_UNLOCKS = {
     6: {"fruits": [0, 1, 2, 3, 4, 5], "features": ["status", "pet", "bank", "leaderboard", "daily_orders", "upgrades", "market", "shop", "worker", "clan"]},
     7: {"fruits": [0, 1, 2, 3, 4, 5, 6], "features": ["status", "pet", "bank", "leaderboard", "daily_orders", "upgrades", "market", "shop", "worker", "clan", "prestige", "league"]},
 }
-
 ALL_FEATURES = ["status", "pet", "bank", "leaderboard", "daily_orders", "upgrades",
                 "market", "shop", "worker", "clan", "prestige", "league"]
 ALL_FRUITS = [0, 1, 2, 3, 4, 5, 6]
@@ -139,16 +155,12 @@ MARKET_CURRENCIES = {
 BANK_DEPOSIT_COMMISSION = 0.05
 BANK_DAILY_INTEREST = 0.10
 LOAN_MULTIPLIER = 5
-LOAN_INTEREST_PER_30MIN = 1.40
-LOAN_BAN_DAYS = 7
 LOAN_PENALTY_MULTIPLIER = 1.5
-LOAN_WARNING_MINUTES = 15
 JAIL_DURATION_DAYS = 7
 JAIL_WORK_INTERVAL_MIN = 10
 JAIL_WORKS_MIN = 12
 JAIL_WORKS_MAX = 20
 
-# هدیه حذف شد
 TEXT_COMMANDS = {
     "وضعیت": "status", "وضعیت من": "status", "پروفایل": "status", "status": "status",
     "پت": "pet_menu", "حیوان": "pet_menu", "حیوانات": "pet_menu", "pet": "pet_menu",
@@ -195,6 +207,7 @@ class UserForm(StatesGroup):
     bank_loan_hours = State()
 
 
+# ==================== فرمت‌ها ====================
 def format_time_remaining(rem_seconds):
     if rem_seconds < 0:
         rem_seconds = 0
@@ -273,6 +286,60 @@ async def safe_edit(callback, text, **kwargs):
             pass
 
 
+# ==================== دیتابیس ====================
+def _ensure_dirs():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(USERS_DIR, exist_ok=True)
+    os.makedirs(CLANS_DIR, exist_ok=True)
+
+
+def _write_json(path, data):
+    tf = path + ".tmp"
+    try:
+        with open(tf, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+        os.replace(tf, path)
+        return True
+    except Exception as e:
+        print(f"write error {path}: {e}")
+        return False
+
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _try_migrate_from_legacy():
+    """اگه data.json قدیمی بود، به split تبدیل کن"""
+    if not os.path.exists("data.json"):
+        return None
+    try:
+        with open("data.json", "r", encoding="utf-8") as f:
+            old = json.load(f)
+    except Exception:
+        return None
+    print("📦 Migrating legacy data.json to split storage...")
+    # بنویس
+    _ensure_dirs()
+    for uid, u in old.get("users", {}).items():
+        _write_json(os.path.join(USERS_DIR, f"{uid}.json"), u)
+    for cid, c in old.get("clans", {}).items():
+        _write_json(os.path.join(CLANS_DIR, f"{cid}.json"), c)
+    global_data = {k: old.get(k) for k in GLOBAL_KEYS}
+    _write_json(GLOBAL_FILE, global_data)
+    # بکاپ
+    try:
+        os.rename("data.json", "data_legacy_backup.json")
+    except Exception:
+        pass
+    print("✅ Migration done. Old file renamed to data_legacy_backup.json")
+    return old
+
+
 def create_default_market():
     return {
         "state": "normal",
@@ -288,7 +355,8 @@ def create_default_market():
 
 
 def create_default_data():
-    return {"game_start_time": datetime.now().isoformat(), "users": {},
+    now = datetime.now().isoformat()
+    return {"game_start_time": now, "first_run_time": now, "users": {},
             "leaderboard": [], "clans": {}, "leagues": {},
             "active_event": None, "gift_codes": {}, "banned": [],
             "clan_requests": {}, "market": create_default_market()}
@@ -309,6 +377,7 @@ def create_default_bank():
         "jail_target_works": random.randint(JAIL_WORKS_MIN, JAIL_WORKS_MAX),
         "jail_last_work": None,
         "jail_ready_to_pay": False,
+        "jail_reason": None,
     }
 
 
@@ -323,7 +392,7 @@ def create_default_user(user_id):
             "planting": {"active": False, "fruit": None, "hours": 0, "expires_at": None, "paused": False, "paused_at": None},
             "harvest_sell": {"active": False, "hours": 0, "expires_at": None, "paused": False, "paused_at": None},
         },
-        "daily_orders": {"date": "", "orders": [], "completed": False},
+        "daily_orders": {"orders": [], "completed": False, "completed_at": None, "next_at": None},
         "prestige": 0, "prestige_multiplier": 1.0,
         "referral_code": f"REF{user_id}{random.randint(100,999)}",
         "pet": None, "phoenix_owned": False, "clan_id": None,
@@ -341,6 +410,8 @@ def _ensure_keys(data):
     for k, v in create_default_data().items():
         if k not in data:
             data[k] = v
+    if not data.get("first_run_time"):
+        data["first_run_time"] = data.get("game_start_time") or datetime.now().isoformat()
     return data
 
 
@@ -383,13 +454,20 @@ def _migrate_user(u, gst):
         for k, v in default_bank.items():
             if k not in u["bank"]:
                 u["bank"][k] = v
+    # migrate daily_orders
+    do = u.get("daily_orders", {})
+    if isinstance(do, dict):
+        if "completed_at" not in do:
+            do["completed_at"] = None
+        if "next_at" not in do:
+            do["next_at"] = None
+        u["daily_orders"] = do
     defaults = {
         "max_plots": 1, "current_fruit": 0, "pet": None, "phoenix_owned": False,
         "clan_id": None, "achievements": [], "pending_purchase": None,
         "period_start_coins": 1, "period_start_time": gst,
         "current_period": 1, "last_seen_period": 1,
-        "used_gift_codes": [],
-        "market_holdings": {},
+        "used_gift_codes": [], "market_holdings": {},
     }
     for k, v in defaults.items():
         if k not in u:
@@ -397,71 +475,230 @@ def _migrate_user(u, gst):
 
 
 def load_data():
+    global _DATA_CACHE, _LAST_USER_JSON, _LAST_CLAN_JSON, _LAST_GLOBAL_JSON
+    if _DATA_CACHE is not None:
+        return _DATA_CACHE
+
     with lock:
-        if not os.path.exists(DATA_FILE):
-            if os.path.exists(BACKUP_FILE):
-                try:
-                    shutil.copy(BACKUP_FILE, DATA_FILE)
-                except Exception:
-                    pass
-            else:
-                d = create_default_data()
-                with open(DATA_FILE, "w", encoding="utf-8") as f:
-                    json.dump(d, f, ensure_ascii=False, indent=2)
-                return d
+        _ensure_dirs()
+
+        # تلاش برای migrate از فایل قدیمی
+        if (not os.path.exists(GLOBAL_FILE) and not os.listdir(USERS_DIR)
+                and os.path.exists("data.json")):
+            _try_migrate_from_legacy()
+
+        global_data = _read_json(GLOBAL_FILE) or {}
+
+        users = {}
+        if os.path.isdir(USERS_DIR):
+            for fname in os.listdir(USERS_DIR):
+                if fname.endswith(".json"):
+                    uid = fname[:-5]
+                    u = _read_json(os.path.join(USERS_DIR, fname))
+                    if u:
+                        users[uid] = u
+
+        clans = {}
+        if os.path.isdir(CLANS_DIR):
+            for fname in os.listdir(CLANS_DIR):
+                if fname.endswith(".json"):
+                    cid = fname[:-5]
+                    c = _read_json(os.path.join(CLANS_DIR, fname))
+                    if c:
+                        clans[cid] = c
+
+        if not global_data and not users:
+            data = create_default_data()
+        else:
+            data = create_default_data()
+            data.update(global_data)
+            data["users"] = users
+            data["clans"] = clans
+
+        data = _ensure_keys(data)
+        gst = data.get("game_start_time", datetime.now().isoformat())
+        for uid, u in data.get("users", {}).items():
+            _migrate_user(u, gst)
+
+        # snapshot برای diff
+        _LAST_USER_JSON = {}
+        for uid, u in data["users"].items():
+            try:
+                _LAST_USER_JSON[uid] = json.dumps(u, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                _LAST_USER_JSON[uid] = ""
+        _LAST_CLAN_JSON = {}
+        for cid, c in data["clans"].items():
+            try:
+                _LAST_CLAN_JSON[cid] = json.dumps(c, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                _LAST_CLAN_JSON[cid] = ""
         try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            data = _ensure_keys(data)
-            gst = data.get("game_start_time", datetime.now().isoformat())
-            for uid, u in data.get("users", {}).items():
-                _migrate_user(u, gst)
-            return data
+            _LAST_GLOBAL_JSON = json.dumps(
+                {k: data.get(k) for k in GLOBAL_KEYS},
+                ensure_ascii=False, sort_keys=True)
         except Exception:
-            if os.path.exists(BACKUP_FILE):
-                try:
-                    with open(BACKUP_FILE, "r", encoding="utf-8") as f:
-                        return _ensure_keys(json.load(f))
-                except Exception:
-                    pass
-            d = create_default_data()
-            with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(d, f, ensure_ascii=False, indent=2)
-            return d
+            _LAST_GLOBAL_JSON = ""
+
+        _DATA_CACHE = data
+        return data
 
 
 def save_data(data):
+    """فقط توی حافظه تغییر می‌ده و trigger رو روشن می‌کنه"""
+    global _DATA_CACHE, _DATA_DIRTY, _SAVE_TRIGGER
+    _DATA_CACHE = _ensure_keys(data)
+    _DATA_DIRTY = True
+    if _SAVE_TRIGGER is not None:
+        try:
+            _SAVE_TRIGGER.set()
+        except Exception:
+            pass
+    return True
+
+
+def _write_to_disk():
+    """نوشتن توی فایل‌های split — فقط چیزایی که عوض شدن"""
+    global _DATA_DIRTY, _LAST_USER_JSON, _LAST_CLAN_JSON, _LAST_GLOBAL_JSON
+    if _DATA_CACHE is None or not _DATA_DIRTY:
+        return
     with lock:
-        data = _ensure_keys(data)
-        tf = DATA_FILE + ".tmp"
+        data = _DATA_CACHE
+
+        # Global
         try:
-            with open(tf, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            return False
-        if os.path.exists(DATA_FILE):
+            global_snap = {k: data.get(k) for k in GLOBAL_KEYS}
+            global_json = json.dumps(global_snap, ensure_ascii=False, sort_keys=True)
+            if global_json != _LAST_GLOBAL_JSON:
+                _write_json(GLOBAL_FILE, global_snap)
+                _LAST_GLOBAL_JSON = global_json
+        except Exception as e:
+            print(f"global write error: {e}")
+
+        # Users
+        for uid, u in data.get("users", {}).items():
             try:
-                shutil.copy(DATA_FILE, BACKUP_FILE)
+                uj = json.dumps(u, ensure_ascii=False, sort_keys=True)
             except Exception:
-                pass
+                continue
+            if uj != _LAST_USER_JSON.get(uid):
+                _write_json(os.path.join(USERS_DIR, f"{uid}.json"), u)
+                _LAST_USER_JSON[uid] = uj
+
+        # Clans
+        for cid, c in data.get("clans", {}).items():
+            try:
+                cj = json.dumps(c, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                continue
+            if cj != _LAST_CLAN_JSON.get(cid):
+                _write_json(os.path.join(CLANS_DIR, f"{cid}.json"), c)
+                _LAST_CLAN_JSON[cid] = cj
+
+        _DATA_DIRTY = False
+
+
+async def saver_loop():
+    """هر بار trigger → ۰.۳ ثانیه صبر → نوشتن"""
+    global _SAVE_TRIGGER
+    _SAVE_TRIGGER = asyncio.Event()
+    while True:
         try:
-            os.replace(tf, DATA_FILE)
-            return True
+            await asyncio.wait_for(_SAVE_TRIGGER.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            pass
+        _SAVE_TRIGGER.clear()
+        await asyncio.sleep(0.3)
+        if _DATA_DIRTY:
+            try:
+                await asyncio.to_thread(_write_to_disk)
+            except Exception as e:
+                print(f"❌ saver error: {e}")
+
+
+def trim_old_data():
+    """پاک کردن دیتای قدیمی"""
+    data = load_data()
+    now = datetime.now()
+    changed = False
+
+    gc = data.get("gift_codes", {})
+    expired = []
+    for code, cd in gc.items():
+        try:
+            end = datetime.fromisoformat(cd.get("end_time", ""))
+            if (now - end).days > 7:
+                expired.append(code)
         except Exception:
-            if os.path.exists(BACKUP_FILE):
-                shutil.copy(BACKUP_FILE, DATA_FILE)
-            return False
+            pass
+    for code in expired:
+        del gc[code]
+        changed = True
+
+    for uid, user in data.get("users", {}).items():
+        bank = user.get("bank", {})
+        hist = bank.get("history", [])
+        if len(hist) > 30:
+            bank["history"] = hist[-30:]
+            user["bank"] = bank
+            changed = True
+
+    reqs = data.get("clan_requests", {})
+    old = []
+    for uid, r in reqs.items():
+        try:
+            created = datetime.fromisoformat(r.get("created_at", ""))
+            if (now - created).days > 3:
+                old.append(uid)
+        except Exception:
+            pass
+    for uid in old:
+        del reqs[uid]
+        changed = True
+
+    if changed:
+        save_data(data)
 
 
+async def daily_backup_loop():
+    """هر ۲۴ ساعت یه بکاپ می‌گیره"""
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    while True:
+        try:
+            await asyncio.sleep(24 * 3600)
+            date_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            backup_path = os.path.join(BACKUP_DIR, f"backup_{date_str}")
+            os.makedirs(backup_path, exist_ok=True)
+            if os.path.exists(GLOBAL_FILE):
+                shutil.copy(GLOBAL_FILE, os.path.join(backup_path, "global.json"))
+            if os.path.isdir(USERS_DIR):
+                shutil.copytree(USERS_DIR, os.path.join(backup_path, "users"), dirs_exist_ok=True)
+            if os.path.isdir(CLANS_DIR):
+                shutil.copytree(CLANS_DIR, os.path.join(backup_path, "clans"), dirs_exist_ok=True)
+            print(f"✅ Backup: {backup_path}")
+            # پاک کردن بکاپ‌های قدیمی (بیشتر از ۷ تا)
+            backups = sorted(os.listdir(BACKUP_DIR))
+            while len(backups) > 7:
+                old = backups.pop(0)
+                try:
+                    shutil.rmtree(os.path.join(BACKUP_DIR, old))
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"❌ backup error: {e}")
+
+
+# ==================== توابع کمکی ====================
 def get_user(user_id):
     return load_data()["users"].get(str(user_id))
 
 
 def update_user(user_id, updates):
     data = load_data()
-    if str(user_id) not in data["users"]:
-        data["users"][str(user_id)] = create_default_user(user_id)
-    data["users"][str(user_id)].update(updates)
+    uid_str = str(user_id)
+    if uid_str not in data["users"]:
+        data["users"][uid_str] = create_default_user(user_id)
+    data["users"][uid_str].update(updates)
     save_data(data)
 
 
@@ -470,7 +707,9 @@ def update_leaderboard(user_id, name, coins, level, prestige):
     data["leaderboard"] = [i for i in data["leaderboard"] if i.get("user_id") != str(user_id)]
     data["leaderboard"].append({"user_id": str(user_id), "name": name,
                                  "coins": coins, "level": level, "prestige": prestige})
-    data["leaderboard"].sort(key=lambda x: (x["prestige"], x["level"], x["coins"]), reverse=True)
+    data["leaderboard"].sort(
+        key=lambda x: (x.get("prestige", 0), x.get("level", 1), x.get("coins", 0)),
+        reverse=True)
     data["leaderboard"] = data["leaderboard"][:50]
     save_data(data)
 
@@ -509,7 +748,6 @@ def generate_account_number():
 
 
 def ensure_account_number(user_id, user):
-    """اگه کاربر شماره حساب نداشت، بساز و ذخیره کن. user جدید رو برمی‌گردونه."""
     bank = user.get("bank", create_default_bank())
     if not bank.get("account_number"):
         bank["account_number"] = generate_account_number()
@@ -584,7 +822,6 @@ def check_all_harvests(user_id):
                 except Exception:
                     pass
     if changed:
-        data["users"][str(user_id)] = user
         save_data(data)
     return changed
 
@@ -672,8 +909,7 @@ def get_clan_leaderboard():
     sorted_clans = sorted(
         clans.items(),
         key=lambda x: (x[1].get("level", 1), x[1].get("treasury", 0)),
-        reverse=True
-    )
+        reverse=True)
     return sorted_clans[:20]
 
 
@@ -686,18 +922,18 @@ def get_week_number(s, now=None):
 
 def get_period_number():
     data = load_data()
-    s = data.get("game_start_time")
+    s = data.get("first_run_time") or data.get("game_start_time")
     return get_week_number(s) if s else 1
 
 
 def get_period_end_datetime(period_num):
     data = load_data()
-    s = data.get("game_start_time")
+    s = data.get("first_run_time") or data.get("game_start_time")
     if not s:
         return None
     try:
         start = datetime.fromisoformat(s)
-        return start + timedelta(days=period_num)
+        return start + timedelta(days=7 * period_num)
     except Exception:
         return None
 
@@ -766,7 +1002,6 @@ def check_period_reset(user_id):
         user["period_start_time"] = datetime.now().isoformat()
         user["current_period"] = cp
         user["last_seen_period"] = cp
-        data["users"][str(user_id)] = user
         save_data(data)
         return True
     return False
@@ -779,7 +1014,8 @@ def update_league_profit(user_id, user, profit):
     pn = user.get("current_period", 1)
     per_key = f"period_{pn}"
     data = load_data()
-    data.setdefault("leagues", {}).setdefault(pk, {}).setdefault(per_key, {"started_at": user.get("period_start_time"), "members": {}})
+    data.setdefault("leagues", {}).setdefault(pk, {}).setdefault(per_key,
+        {"started_at": user.get("period_start_time"), "members": {}})
     data["leagues"][pk][per_key]["members"][str(user_id)] = {"name": user.get("name", "?"), "profit": profit}
     save_data(data)
 
@@ -828,49 +1064,152 @@ def get_min_coin_reserve(user):
     return max(1, int(PRICES[0][0] * mult))
 
 
+# ==================== ارتقاء ابزار ====================
+def upgrade_price(key, current_level):
+    base = {"auto_water": 1000, "golden_pot": 2000, "professional_seeder": 5000}
+    if key not in base:
+        return None
+    return base[key] * (100 ** current_level)
+
+
+def get_growth_mult(user):
+    lvl = user["upgrades"].get("auto_water", 0)
+    if lvl > 0:
+        return 0.8 ** lvl
+    return 1.0
+
+
+def get_seed_price(fruit_idx, user, effects):
+    bp = int(PRICES[fruit_idx][0] * user["prestige_multiplier"] * effects["buy_mult"])
+    lvl = user["upgrades"].get("professional_seeder", 0)
+    if lvl > 0:
+        discount = min(0.5, 0.1 * lvl)
+        bp = int(bp * (1 - discount))
+    return max(1, bp)
+
+
+def get_sell_bonus(user):
+    lvl = user["upgrades"].get("golden_pot", 0)
+    return 1 + 0.1 * lvl
+
+
 # ==================== بانک ====================
 def update_bank_interest(user_id):
+    """سود یک کاربر — برای فراخوانی مستقیم"""
     data = load_data()
     user = data["users"].get(str(user_id))
     if not user:
         return
+    _apply_interest_to_user(user, datetime.now())
+    save_data(data)
+
+
+def _apply_interest_to_user(user, now):
     bank = user.get("bank", create_default_bank())
     last_str = bank.get("last_interest")
     if not last_str:
-        bank["last_interest"] = datetime.now().isoformat()
+        bank["last_interest"] = now.isoformat()
         user["bank"] = bank
-        data["users"][str(user_id)] = user
-        save_data(data)
         return
     try:
         last = datetime.fromisoformat(last_str)
     except Exception:
-        bank["last_interest"] = datetime.now().isoformat()
+        bank["last_interest"] = now.isoformat()
         user["bank"] = bank
-        data["users"][str(user_id)] = user
-        save_data(data)
         return
-    now = datetime.now()
-    elapsed_sec = (now - last).total_seconds()
-    elapsed_days = elapsed_sec / 86400
+    elapsed_days = (now - last).total_seconds() / 86400
     if elapsed_days >= 1:
         days = int(elapsed_days)
         balance = bank.get("balance", 0)
         new_balance = int(balance * ((1 + BANK_DAILY_INTEREST) ** days))
+        added = new_balance - balance
         bank["balance"] = new_balance
-        bank["last_interest"] = now.isoformat()
+        bank["last_interest"] = (last + timedelta(days=days)).isoformat()
         history = bank.get("history", [])
-        history.append({"type": "interest", "amount": new_balance - balance,
+        history.append({"type": "interest", "amount": added,
                         "time": now.isoformat(), "days": days})
         bank["history"] = history[-50:]
-    hist = bank.get("balance_history", [])
-    cutoff = now - timedelta(hours=24)
-    hist = [h for h in hist if datetime.fromisoformat(h["time"]) > cutoff]
-    hist.append({"time": now.isoformat(), "balance": bank.get("balance", 0)})
-    bank["balance_history"] = hist[-100:]
     user["bank"] = bank
-    data["users"][str(user_id)] = user
-    save_data(data)
+
+
+def apply_interest_all_users():
+    data = load_data()
+    now = datetime.now()
+    changed = False
+    for uid, user in data.get("users", {}).items():
+        try:
+            bank_before = user.get("bank", {}).get("last_interest")
+            _apply_interest_to_user(user, now)
+            if user.get("bank", {}).get("last_interest") != bank_before:
+                changed = True
+        except Exception as e:
+            print(f"Interest error {uid}: {e}")
+    if changed:
+        save_data(data)
+        print(f"✅ Bank interest at {now.strftime('%H:%M')}")
+
+
+def check_overdue_loans():
+    data = load_data()
+    now = datetime.now()
+    notifications = []
+    for uid, user in data.get("users", {}).items():
+        try:
+            bank = user.get("bank", {})
+            loan = bank.get("loan")
+            if not loan:
+                continue
+            try:
+                due = datetime.fromisoformat(loan["due_time"])
+            except Exception:
+                continue
+            remaining = (due - now).total_seconds()
+            total_due = loan.get("total_due", 0)
+
+            if 0 < remaining <= 15 * 60 and not loan.get("warning_sent"):
+                loan["warning_sent"] = True
+                bank["loan"] = loan
+                notifications.append((uid,
+                    f"⚠️ **هشدار وام**\n\n"
+                    f"⏰ فقط **{format_time_remaining(remaining)}** تا سررسید!\n"
+                    f"💵 بازپرداخت: {format_coins(total_due)}\n\n"
+                    f"❌ اگه پرداخت نکنی، **۱.۵ برابر** جریمه می‌شی!"))
+                continue
+
+            if remaining <= 0:
+                penalty = int(total_due * LOAN_PENALTY_MULTIPLIER)
+                coins = user.get("coins", 0)
+                if coins >= penalty:
+                    user["coins"] = coins - penalty
+                    bank["loan"] = None
+                    bank["loan_banned_until"] = (now + timedelta(days=7)).isoformat()
+                    notifications.append((uid,
+                        f"💸 **وام معوق!**\n\n"
+                        f"💰 جریمه (۱.۵ برابر): **{format_coins(penalty)}**\n"
+                        f"💼 سکه‌هات: {format_coins(user['coins'])}\n\n"
+                        f"🚫 تا **۷ روز** نمی‌تونی وام بگیری."))
+                else:
+                    user["coins"] = 0
+                    bank["loan"] = None
+                    bank["in_jail"] = True
+                    bank["jail_until"] = (now + timedelta(days=JAIL_DURATION_DAYS)).isoformat()
+                    bank["jail_work_count"] = 0
+                    bank["jail_target_works"] = random.randint(JAIL_WORKS_MIN, JAIL_WORKS_MAX)
+                    bank["jail_last_work"] = None
+                    bank["jail_ready_to_pay"] = False
+                    bank["loan_banned_until"] = None
+                    bank["jail_reason"] = "loan_overdue"
+                    notifications.append((uid,
+                        f"🔒 **به زندان افتادی!**\n\n"
+                        f"💸 وامت رو پرداخت نکردی و پول کافی نداشتی.\n\n"
+                        f"⏰ مدت: **{JAIL_DURATION_DAYS} روز**\n"
+                        f"🔨 با کار کردن می‌تونی زودتر آزاد شی.\n"
+                        f"🚫 بعد از آزادی، **۷ روز** منع وام."))
+        except Exception as e:
+            print(f"Loan check {uid}: {e}")
+    if notifications:
+        save_data(data)
+    return notifications
 
 
 def get_avg_balance_24h(user):
@@ -884,7 +1223,7 @@ def get_avg_balance_24h(user):
 
 def calculate_loan_due(amount, hours):
     periods = int(hours * 2)
-    return int(amount * (LOAN_INTEREST_PER_30MIN ** periods))
+    return amount + int(amount * 0.40 * periods)
 
 
 # ==================== بازار ====================
@@ -912,35 +1251,24 @@ def update_market_prices():
     if minutes < 1:
         return
     minutes = min(minutes, 120)
+
+    state = market.get("state", "normal")
+    if state == "profit":
+        drift = 1.005
+    elif state == "loss":
+        drift = 0.9995
+    else:
+        drift = 1.0
+
     for _ in range(minutes):
         for cid, cdata in market["currencies"].items():
-            base = cdata["base_price"]
-            price = cdata["price"]
-            mode = cdata.get("mode", "normal")
-            change = 0.0
-            new_price = price
-            if mode == "normal":
-                change = random.uniform(-5, 5) / 100
-                new_price = price * (1 + change)
-                if new_price >= base * 1.375:
-                    mode = "loss"
-                elif new_price <= base * 0.625:
-                    mode = "profit"
-            elif mode == "loss":
-                change = random.uniform(-5, 0) / 100
-                new_price = price * (1 + change)
-                if new_price <= base:
-                    new_price = base
-                    mode = "normal"
-            else:
-                change = random.uniform(0, 5) / 100
-                new_price = price * (1 + change)
-                if new_price >= base:
-                    new_price = base
-                    mode = "normal"
+            base = cdata["base_price"] * drift
+            cdata["base_price"] = round(base, 4)
+            change = random.uniform(-5, 5) / 100
+            new_price = base * (1 + change)
             cdata["price"] = round(new_price, 4)
-            cdata["mode"] = mode
             cdata["last_change"] = round(change * 100, 2)
+
     market["last_update"] = datetime.now().isoformat()
     data["market"] = market
     save_data(data)
@@ -984,15 +1312,13 @@ def process_workers(user_id):
             else:
                 fi = pw.get("fruit")
                 if fi is not None:
-                    buy_price = int(PRICES[fi][0] * user["prestige_multiplier"] * effects["buy_mult"])
                     for plot in user.get("plots", []):
                         if plot["state"] != "idle":
                             continue
+                        buy_price = get_seed_price(fi, user, effects)
                         if user["coins"] < buy_price:
                             break
-                        gt = GROWTH_TIMES[fi] * effects["growth_mult"]
-                        if user["upgrades"].get("auto_water", 0) > 0:
-                            gt *= 0.8
+                        gt = GROWTH_TIMES[fi] * effects["growth_mult"] * get_growth_mult(user)
                         sb = get_pet_effect(user, "speed")
                         if sb > 0:
                             gt *= (1 - sb / 100)
@@ -1003,7 +1329,7 @@ def process_workers(user_id):
                         user["coins"] -= buy_price
                         changed = True
         except Exception as e:
-            print(f"Worker planting error: {e}")
+            print(f"Worker plant error: {e}")
     hw = workers.get("harvest_sell", {})
     if hw.get("active") and not hw.get("paused"):
         try:
@@ -1015,6 +1341,7 @@ def process_workers(user_id):
                 hw["paused_at"] = None
                 changed = True
             else:
+                # برداشت
                 for plot in user.get("plots", []):
                     if plot["state"] != "harvested":
                         continue
@@ -1028,17 +1355,24 @@ def process_workers(user_id):
                     plot["state"] = "idle"
                     plot["harvest_time"] = None
                     changed = True
+                # فروش (چند تا در هر بار)
                 inv = user.get("inventory", {})
+                sold_count = 0
+                MAX_PER_CALL = 50
                 for fn in list(inv.keys()):
+                    if sold_count >= MAX_PER_CALL:
+                        break
                     if inv.get(fn, 0) <= 0:
                         continue
-                    if fn.startswith("طلایی_"):
-                        continue
+                    is_golden = fn.startswith("طلایی_")
+                    real_name = fn.replace("طلایی_", "") if is_golden else fn
                     try:
-                        cf = FRUITS.index(fn)
+                        cf = FRUITS.index(real_name)
                     except Exception:
                         continue
                     bs = int(PRICES[cf][1] * user["prestige_multiplier"] * effects["sell_mult"])
+                    if is_golden:
+                        bs *= GOLDEN_MULT
                     sp = bs
                     pb = get_pet_effect(user, "sell")
                     if pb > 0:
@@ -1047,10 +1381,12 @@ def process_workers(user_id):
                     if cb > 0:
                         sp += int(bs * cb / 100)
                     if user["upgrades"].get("golden_pot", 0) > 0:
-                        sp = int(sp * (1 + 0.1 * user["upgrades"]["golden_pot"]))
+                        sp = int(sp * get_sell_bonus(user))
                     commission = int(sp * 0.2)
                     final_sp = sp - commission
-                    xp = int(xp_from_sale(fn) * user["prestige_multiplier"] * effects["xp_mult"])
+                    xp = int(xp_from_sale(real_name) * user["prestige_multiplier"] * effects["xp_mult"])
+                    if is_golden:
+                        xp *= GOLDEN_MULT
                     px = get_pet_effect(user, "xp")
                     if px > 0:
                         xp += int(xp * px / 100)
@@ -1064,12 +1400,11 @@ def process_workers(user_id):
                         del inv[fn]
                     user["inventory"] = inv
                     changed = True
-                    break
+                    sold_count += 1
         except Exception as e:
             print(f"Worker harvest error: {e}")
     if changed:
         user["workers"] = workers
-        data["users"][str(user_id)] = user
         save_data(data)
         update_leaderboard(user_id, user["name"], user["coins"], user["level"], user["prestige"])
         profit = user["coins"] - user.get("period_start_coins", 1)
@@ -1108,7 +1443,7 @@ def get_keyboard(user_id):
     kb = InlineKeyboardBuilder()
     plots = user.get("plots", [])
     max_plots = user.get("max_plots", 1)
-    if max_plots == 1:
+    if max_plots == 1 and plots:
         plot = plots[0]
         cf = plot.get("fruit", 0)
         fruit = FRUITS[cf]
@@ -1151,7 +1486,6 @@ def get_keyboard(user_id):
         kb.button("👷 کارگرها", callback_data=f"{prefix}worker_menu")
     if has_feature(user, "clan"):
         kb.button("🏰 کلن", callback_data=f"{prefix}clan_menu")
-    # دکمه هدیه حذف شد ✅
     if has_feature(user, "league"):
         kb.button("🏅 لیگ", callback_data=f"{prefix}league_menu")
         kb.button("🎖️ افتخارات", callback_data=f"{prefix}achievements")
@@ -1256,7 +1590,7 @@ def build_status_text(user, user_id):
     text += f"\n🌱 میوه انتخابی: {FRUITS[user['current_fruit']]}\n\n"
     text += f"🍎 **قیمت‌ها (خرید | فروش | XP):**\n"
     for i in get_available_fruits(user):
-        bp = int(PRICES[i][0] * mult * effects["buy_mult"])
+        bp = get_seed_price(i, user, effects)
         sp = int(PRICES[i][1] * mult * effects["sell_mult"])
         if FRUITS[i] in XP_FROM_SALES:
             xp_min, xp_max = XP_FROM_SALES[FRUITS[i]]
@@ -1288,11 +1622,11 @@ def get_user_league_rank(user_id, user):
     return "—"
 
 
+# ==================== ربات ====================
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
 
 
-# ==================== JAIL CHECK ====================
 async def check_jail_and_block(message_or_callback, user, uid):
     bank = user.get("bank", {})
     if not bank.get("in_jail"):
@@ -1306,6 +1640,9 @@ async def check_jail_and_block(message_or_callback, user, uid):
                 bank["jail_until"] = None
                 bank["jail_work_count"] = 0
                 bank["jail_ready_to_pay"] = False
+                if bank.get("jail_reason") == "loan_overdue":
+                    bank["loan_banned_until"] = (datetime.now() + timedelta(days=7)).isoformat()
+                    bank["jail_reason"] = None
                 user["bank"] = bank
                 user["coins"] = get_initial_coins_for_prestige(user)
                 update_user(uid, {"bank": bank, "coins": user["coins"]})
@@ -1333,14 +1670,14 @@ async def show_jail_page(message_or_callback, user, uid):
     ready = bank.get("jail_ready_to_pay", False)
     text = (f"🔒 **زندان**\n\n"
             f"⏰ زمان باقی‌مونده: {time_left}\n"
-            f"🔨 کارهای انجام‌شده: {work_count}/{target}\n\n")
+            f"🔨 کارهای انجام‌شده: **{work_count}/{target}**\n\n")
     if ready:
-        text += "✅ آماده پرداخت جریمه هستی!"
+        text += "✅ کارهای لازم رو انجام دادی! می‌تونی آزاد شی."
     else:
-        text += "💡 با کار کردن می‌تونی جریمه رو پرداخت کنی."
+        text += "💡 با کار کردن می‌تونی زودتر آزاد شی."
     kb = InlineKeyboardBuilder()
     if ready:
-        kb.button("💰 پرداخت جریمه و آزادی", callback_data=f"{prefix}jail_pay")
+        kb.button("🎉 آزادی", callback_data=f"{prefix}jail_pay")
     else:
         can_work = True
         last_work_str = bank.get("jail_last_work")
@@ -1376,7 +1713,7 @@ async def show_jail_page(message_or_callback, user, uid):
                 pass
 
 
-# ==================== ADMIN ====================
+# ==================== ADMIN COMMANDS ====================
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if not is_admin(message.from_user.id):
@@ -1397,11 +1734,8 @@ async def cmd_admin(message: Message):
             "`/events` | `/end_event`\n"
             "`/giftcode <amt> <all|num> <h> <code>`\n\n"
             "**Market:**\n"
-            "`/market profit`\n"
-            "`/market normal`\n"
-            "`/market loss`\n\n"
-            f"💰 میانگین قیمت پایه: **{avg_base:,.2f}**\n"
-            f"📊 وضعیت: **{get_market_state_fa(market.get('state', 'normal'))}**")
+            "`/market profit` | `/market normal` | `/market loss`\n\n"
+            f"💰 میانگین قیمت پایه: **{avg_base:,.2f}**")
     await message.answer(text)
 
 
@@ -1706,6 +2040,8 @@ async def cmd_giftcode(message: Message):
         amt = int(p[1]); ls = p[2].lower(); h = float(p[3]); code = p[4].strip()
     except Exception as e:
         await message.answer(f"❌ {e}"); return
+    if amt <= 0:
+        await message.answer("❌ مقدار باید مثبت باشه."); return
     if not code.startswith("/"):
         await message.answer("❌ کد باید با / شروع بشه."); return
     if len(code) < 2:
@@ -1744,42 +2080,23 @@ async def cmd_market(message: Message):
         avg_base = sum(c["base_price"] for c in market["currencies"].values()) / len(market["currencies"])
         await message.answer(
             f"💹 **مدیریت بازار**\n\n"
-            f"💰 میانگین قیمت پایه: **{avg_base:,.2f}**\n"
-            f"📊 وضعیت: **{get_market_state_fa(market.get('state', 'normal'))}**\n\n"
-            f"`/market profit` — سود\n"
-            f"`/market normal` — عادی\n"
-            f"`/market loss` — ضرر")
+            f"💰 میانگین قیمت پایه: **{avg_base:,.2f}**\n\n"
+            f"`/market profit` — صعودی (+۰.۵٪ در دقیقه)\n"
+            f"`/market normal` — توقف\n"
+            f"`/market loss` — نزولی (-۰.۰۵٪ در دقیقه)")
         return
     mode = p[1].lower()
     if mode not in ["profit", "normal", "loss"]:
         await message.answer("❌ profit / normal / loss"); return
     data = load_data()
     market = data.get("market", create_default_market())
-    if mode == "profit":
-        for cid, cdata in market["currencies"].items():
-            cdata["base_price"] = round(cdata["base_price"] * 1.15, 4)
-            cdata["price"] = round(cdata["base_price"] * random.uniform(1.05, 1.2), 4)
-            cdata["mode"] = "normal"
-            cdata["last_change"] = 0.0
-        market["state"] = "profit"
-    elif mode == "loss":
-        for cid, cdata in market["currencies"].items():
-            cdata["base_price"] = round(cdata["base_price"] * 0.85, 4)
-            cdata["price"] = round(cdata["base_price"] * random.uniform(0.8, 0.95), 4)
-            cdata["mode"] = "normal"
-            cdata["last_change"] = 0.0
-        market["state"] = "loss"
-    else:
-        for cid, cdata in market["currencies"].items():
-            cdata["price"] = cdata["base_price"]
-            cdata["mode"] = "normal"
-            cdata["last_change"] = 0.0
-        market["state"] = "normal"
+    market["state"] = mode
     market["last_update"] = datetime.now().isoformat()
     data["market"] = market
     save_data(data)
     avg_base = sum(c["base_price"] for c in market["currencies"].values()) / len(market["currencies"])
-    await message.answer(f"✅ بازار در حالت **{get_market_state_fa(mode)}**\n💰 میانگین: {avg_base:,.2f}")
+    note = {"profit": "📈 صعودی", "loss": "📉 نزولی", "normal": "⏸ توقف"}[mode]
+    await message.answer(f"✅ بازار: **{note}**\n💰 میانگین فعلی: {avg_base:,.2f}")
 
 
 # ==================== USER COMMANDS ====================
@@ -1800,7 +2117,6 @@ async def cmd_start(message: Message, state: FSMContext):
         return
     update_bank_interest(user_id)
     user = get_user(user_id)
-    # تولید شماره حساب اگه نداشت
     user = ensure_account_number(user_id, user)
     if await check_jail_and_block(message, user, user_id):
         return
@@ -1885,8 +2201,7 @@ async def bank_deposit_amount_input(message: Message, state: FSMContext):
     text = (f"🏦 **تأیید سپرده‌گذاری**\n\n"
             f"💰 مبلغ: **{format_coins(coins)}**\n"
             f"📊 کمیسیون ۵٪: **{format_coins(commission)}**\n"
-            f"✅ واریز به حساب: **{format_coins(final_amount)}**\n\n"
-            f"⚠️ آیا مطمئنی؟")
+            f"✅ واریز: **{format_coins(final_amount)}**\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -1913,15 +2228,13 @@ async def bank_withdraw_amount_input(message: Message, state: FSMContext):
                 raise ValueError
         except Exception:
             await state.clear()
-            await message.answer("❌ عدد مثبت یا «همه». عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+            await message.answer("❌ عدد مثبت یا «همه».", reply_markup=get_keyboard(uid)); return
     if bank.get("balance", 0) < coins:
         await state.clear()
         await message.answer(f"❌ موجودی بانک: {format_coins(bank.get('balance', 0))}", reply_markup=get_keyboard(uid)); return
     await state.update_data(tr_type="bank_withdraw", tr_amount=coins)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🏦 **تأیید برداشت**\n\n"
-            f"💰 مبلغ: **{format_coins(coins)}**\n"
-            f"📊 کمیسیون: رایگان\n\n⚠️ آیا مطمئنی؟")
+    text = (f"🏦 **تأیید برداشت**\n\n💰 مبلغ: **{format_coins(coins)}**\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -1940,17 +2253,17 @@ async def bank_transfer_target_input(message: Message, state: FSMContext):
     acc = message.text.strip()
     if not acc.isdigit() or len(acc) != 6:
         await state.clear()
-        await message.answer("❌ شماره حساب باید ۶ رقم باشه. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ شماره حساب باید ۶ رقم باشه.", reply_markup=get_keyboard(uid)); return
     tid, tg = find_user_by_account(acc)
     if not tid:
         await state.clear()
-        await message.answer("❌ حساب پیدا نشد. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ حساب پیدا نشد.", reply_markup=get_keyboard(uid)); return
     if tid == str(uid):
         await state.clear()
         await message.answer("❌ به خودت نمی‌تونی انتقال بدی.", reply_markup=get_keyboard(uid)); return
     await state.update_data(bank_transfer_target=tid, bank_transfer_target_name=tg.get("name", "?"), bank_transfer_acc=acc)
     await state.set_state(UserForm.bank_transfer_amount)
-    await message.answer(f"💰 به **{tg.get('name','?')}** چقدر سکه انتقال بدی؟\n\n❌ برای لغو /cancel بزن.")
+    await message.answer(f"💰 به **{tg.get('name','?')}** چقدر؟\n\n❌ /cancel")
 
 
 @dp.message(UserForm.bank_transfer_amount)
@@ -1972,7 +2285,7 @@ async def bank_transfer_amount_input(message: Message, state: FSMContext):
             raise ValueError
     except Exception:
         await state.clear()
-        await message.answer("❌ عدد مثبت. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ عدد مثبت.", reply_markup=get_keyboard(uid)); return
     bank = user.get("bank", {})
     if bank.get("balance", 0) < coins:
         await state.clear()
@@ -1980,12 +2293,9 @@ async def bank_transfer_amount_input(message: Message, state: FSMContext):
     await state.update_data(tr_type="bank_transfer", tr_target_id=tid,
                              tr_target_name=tname, tr_amount=coins, tr_acc=acc)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🏦 **تأیید انتقال بانکی**\n\n"
-            f"👤 به: **{tname}**\n"
-            f"🆔 حساب: `{acc}`\n"
+    text = (f"🏦 **تأیید انتقال**\n\n👤 به: **{tname}**\n🆔 حساب: `{acc}`\n"
             f"💰 مبلغ: **{format_coins(coins)}**\n"
-            f"💼 موجودی بعد: {format_coins(bank.get('balance', 0) - coins)}\n\n"
-            f"⚠️ آیا مطمئنی؟")
+            f"💼 بعد: {format_coins(bank.get('balance', 0) - coins)}\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -2004,7 +2314,7 @@ async def bank_loan_amount_input(message: Message, state: FSMContext):
     bank = user.get("bank", {})
     if bank.get("loan"):
         await state.clear()
-        await message.answer("❌ شما وام فعال دارید. اول پرداخت کنید.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ شما وام فعال دارید.", reply_markup=get_keyboard(uid)); return
     banned_until = bank.get("loan_banned_until")
     if banned_until:
         try:
@@ -2012,7 +2322,7 @@ async def bank_loan_amount_input(message: Message, state: FSMContext):
             if datetime.now() < bu:
                 rem = (bu - datetime.now()).total_seconds()
                 await state.clear()
-                await message.answer(f"❌ تا {format_time_remaining(rem)} دیگه نمی‌تونی وام بگیری.", reply_markup=get_keyboard(uid)); return
+                await message.answer(f"❌ تا {format_time_remaining(rem)} نمی‌تونی وام بگیری.", reply_markup=get_keyboard(uid)); return
         except Exception:
             pass
     avg = get_avg_balance_24h(user)
@@ -2024,16 +2334,16 @@ async def bank_loan_amount_input(message: Message, state: FSMContext):
             raise ValueError
     except Exception:
         await state.clear()
-        await message.answer("❌ عدد مثبت. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ عدد مثبت.", reply_markup=get_keyboard(uid)); return
     if amount > max_loan:
         await state.clear()
-        await message.answer(f"❌ حداکثر {format_coins(max_loan)} می‌تونی وام بگیری.", reply_markup=get_keyboard(uid)); return
+        await message.answer(f"❌ حداکثر {format_coins(max_loan)}.", reply_markup=get_keyboard(uid)); return
     if amount < 1000:
         await state.clear()
         await message.answer("❌ حداقل ۱۰۰۰ سکه.", reply_markup=get_keyboard(uid)); return
     await state.update_data(bank_loan_amount=amount)
     await state.set_state(UserForm.bank_loan_hours)
-    await message.answer(f"⏰ چند ساعت می‌خوای وام بگیری؟\n(هر ۳۰ دقیقه ۴۰٪ سود)\n\n❌ برای لغو /cancel بزن.")
+    await message.answer(f"⏰ چند ساعت؟ (۱-۷۲)\n(هر ۳۰ دقیقه ۴۰٪ سود)\n\n❌ /cancel")
 
 
 @dp.message(UserForm.bank_loan_hours)
@@ -2050,26 +2360,22 @@ async def bank_loan_hours_input(message: Message, state: FSMContext):
             raise ValueError
     except Exception:
         await state.clear()
-        await message.answer("❌ عدد بین ۱ تا ۷۲ ساعت. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ عدد بین ۱ تا ۷۲.", reply_markup=get_keyboard(uid)); return
     period_end = get_period_end_datetime(user.get("current_period", 1))
     if period_end:
         loan_end = datetime.now() + timedelta(hours=hours)
         if loan_end > period_end:
             await state.clear()
-            await message.answer("❌ در حال حاضر امکان وام گرفتن وجود ندارد. لطفاً بعد از اتمام دوره تلاش کنید.",
-                reply_markup=get_keyboard(uid)); return
+            await message.answer("❌ بعد از اتمام دوره تلاش کنید.", reply_markup=get_keyboard(uid)); return
     d = await state.get_data()
     amount = d.get("bank_loan_amount", 0)
     total_due = calculate_loan_due(amount, hours)
     await state.update_data(tr_type="bank_loan", tr_amount=amount,
                              tr_hours=hours, tr_total_due=total_due)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🏦 **تأیید وام**\n\n"
-            f"💰 مبلغ وام: **{format_coins(amount)}**\n"
-            f"⏰ مدت: **{hours} ساعت**\n"
-            f"📈 سود: ۴۰٪ هر ۳۰ دقیقه\n"
-            f"💵 بازپرداخت نهایی: **{format_coins(total_due)}**\n\n"
-            f"⚠️ آیا مطمئنی؟")
+    text = (f"🏦 **تأیید وام**\n\n💰 مبلغ: **{format_coins(amount)}**\n"
+            f"⏰ مدت: **{hours} ساعت**\n📈 سود: ۴۰٪ هر ۳۰ دقیقه\n"
+            f"💵 بازپرداخت: **{format_coins(total_due)}**\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -2081,11 +2387,10 @@ async def bank_loan_hours_input(message: Message, state: FSMContext):
 async def cancel_on_unexpected(message: Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
-    await message.answer("❌ **عملیات لغو شد.**\nچون به‌جای تأیید یا لغو، پیام دیگه‌ای فرستادی.",
-        reply_markup=get_keyboard(uid))
+    await message.answer("❌ **عملیات لغو شد.**", reply_markup=get_keyboard(uid))
 
 
-# ==================== FSM: WORKER HOURS ====================
+# ==================== FSM: WORKER ====================
 @dp.message(UserForm.worker_plant_hours)
 async def wp_hours_input(message: Message, state: FSMContext):
     uid = message.from_user.id
@@ -2098,7 +2403,7 @@ async def wp_hours_input(message: Message, state: FSMContext):
             raise ValueError
     except Exception:
         await state.clear()
-        await message.answer("❌ عدد بین ۱ تا ۷۲. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ ۱-۷۲.", reply_markup=get_keyboard(uid)); return
     d = await state.get_data()
     fruit_idx = d.get("wp_fruit")
     if fruit_idx is None:
@@ -2108,10 +2413,8 @@ async def wp_hours_input(message: Message, state: FSMContext):
     total_cost = (sp // 3) * hours
     await state.update_data(tr_type="worker_plant", tr_fruit=fruit_idx, tr_hours=hours, tr_cost=total_cost)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🌱 **تأیید اجاره‌ی کارگر کاشت**\n\n"
-            f"🍎 میوه: {FRUITS[fruit_idx]}\n"
-            f"⏰ مدت: {hours} ساعت\n"
-            f"💰 هزینه: {format_coins(total_cost)}\n\n"
+    text = (f"🌱 **تأیید کارگر کاشت**\n\n🍎 {FRUITS[fruit_idx]}\n"
+            f"⏰ {hours} ساعت\n💰 {format_coins(total_cost)}\n\n"
             f"💵 موجودی: {format_coins(user['coins'])}")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
@@ -2132,13 +2435,11 @@ async def wh_hours_input(message: Message, state: FSMContext):
             raise ValueError
     except Exception:
         await state.clear()
-        await message.answer("❌ عدد بین ۱ تا ۷۲. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ ۱-۷۲.", reply_markup=get_keyboard(uid)); return
     await state.update_data(tr_type="worker_harvest", tr_hours=hours)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"💼 **تأیید اجاره‌ی کارگر برداشت و فروش**\n\n"
-            f"⏰ مدت: {hours} ساعت\n"
-            f"💰 هزینه: رایگان\n"
-            f"📊 کمیسیون: ۲۰٪ از هر فروش\n\n✅ تأیید می‌کنی؟")
+    text = (f"💼 **تأیید کارگر برداشت/فروش**\n\n⏰ {hours} ساعت\n"
+            f"💰 رایگان\n📊 کمیسیون ۲۰٪\n\n✅ تأیید؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -2159,7 +2460,7 @@ async def process_clan_name(message: Message, state: FSMContext):
     data = load_data()
     for c in data.get("clans", {}).values():
         if c.get("name", "").lower() == name.lower():
-            await message.answer("❌ تکراریه. نام دیگه بفرست یا /cancel بزن:"); return
+            await message.answer("❌ تکراریه:"); return
     if user["coins"] < CLAN_CREATE_COST:
         await state.clear()
         await message.answer(f"❌ نیاز به {format_coins(CLAN_CREATE_COST)}", reply_markup=get_keyboard(uid)); return
@@ -2179,7 +2480,7 @@ async def process_clan_search(message: Message, state: FSMContext):
     query = message.text.strip()
     await state.clear()
     if len(query) < 2:
-        await message.answer("❌ نام خیلی کوتاهه. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ کوتاه.", reply_markup=get_keyboard(uid)); return
     data = load_data()
     found_clan = None
     found_cid = None
@@ -2189,17 +2490,15 @@ async def process_clan_search(message: Message, state: FSMContext):
             found_cid = cid
             break
     if not found_clan:
-        await message.answer(f"❌ کلنی با نام «{query}» پیدا نشد. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer(f"❌ پیدا نشد.", reply_markup=get_keyboard(uid)); return
     if len(found_clan["members"]) >= CLAN_MAX_MEMBERS.get(found_clan["level"], 10):
-        await message.answer("❌ این کلن پر شده.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ پره.", reply_markup=get_keyboard(uid)); return
     if str(uid) in found_clan["members"]:
-        await message.answer("شما قبلاً عضو این کلن هستید.", reply_markup=get_keyboard(uid)); return
-    text = (f"🏰 **کلن پیدا شد!**\n\n"
-            f"📛 نام: **{found_clan['name']}**\n"
+        await message.answer("قبلاً عضو هستی.", reply_markup=get_keyboard(uid)); return
+    text = (f"🏰 **کلن پیدا شد!**\n\n📛 {found_clan['name']}\n"
             f"📊 لول: {found_clan['level']}\n"
-            f"👥 اعضا: {len(found_clan['members'])}/{CLAN_MAX_MEMBERS.get(found_clan['level'],10)}\n"
-            f"👑 لیدر: {found_clan['leader_name']}\n\n"
-            f"✅ می‌خوای درخواست عضویت بدی؟")
+            f"👥 {len(found_clan['members'])}/{CLAN_MAX_MEMBERS.get(found_clan['level'],10)}\n"
+            f"👑 {found_clan['leader_name']}\n\n✅ درخواست بدی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ ارسال درخواست", callback_data=f"clan_req_{found_cid}")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -2217,7 +2516,7 @@ async def process_clan_invite(message: Message, state: FSMContext):
     tid, tg = find_user_by_name_or_code(query)
     if not tid:
         await state.clear()
-        await message.answer("❌ کاربر پیدا نشد. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ پیدا نشد.", reply_markup=get_keyboard(uid)); return
     if tg.get("clan_id"):
         await state.clear()
         await message.answer("❌ در کلن دیگه‌ایه.", reply_markup=get_keyboard(uid)); return
@@ -2227,7 +2526,7 @@ async def process_clan_invite(message: Message, state: FSMContext):
         await state.clear(); return
     if len(clan["members"]) >= CLAN_MAX_MEMBERS.get(clan["level"], 10):
         await state.clear()
-        await message.answer("❌ کلن پر است!", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ پر است!", reply_markup=get_keyboard(uid)); return
     clan["members"].append(str(tid))
     clan["member_names"][str(tid)] = tg["name"]
     save_data(data)
@@ -2248,7 +2547,7 @@ async def process_clan_donate(message: Message, state: FSMContext):
             raise ValueError
     except Exception:
         await state.clear()
-        await message.answer("❌ حداقل ۱۰,۰۰۰. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ حداقل ۱۰,۰۰۰.", reply_markup=get_keyboard(uid)); return
     if user["coins"] < amt:
         await state.clear()
         await message.answer(f"❌ موجودی: {format_coins(user['coins'])}", reply_markup=get_keyboard(uid)); return
@@ -2258,11 +2557,8 @@ async def process_clan_donate(message: Message, state: FSMContext):
     await state.update_data(tr_type="clan_donate", tr_amount=amt,
                              tr_clan_id=user["clan_id"], tr_clan_name=clan["name"])
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🏰 **تأیید اهدا به خزانه**\n\n"
-            f"🏰 کلن: **{clan['name']}**\n"
-            f"💰 مبلغ: **{format_coins(amt)}**\n"
-            f"💼 بعد از اهدا: {format_coins(user['coins'] - amt)}\n\n"
-            f"⚠️ آیا مطمئنی؟")
+    text = (f"🏰 **تأیید اهدا**\n\n🏰 {clan['name']}\n💰 **{format_coins(amt)}**\n"
+            f"💼 بعد: {format_coins(user['coins'] - amt)}\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -2286,7 +2582,7 @@ async def process_clan_chat(message: Message, state: FSMContext):
         except Exception:
             pass
     await state.clear()
-    await message.answer("✅ پیام ارسال شد.", reply_markup=get_keyboard(uid))
+    await message.answer("✅ ارسال شد.", reply_markup=get_keyboard(uid))
 
 
 # ==================== FSM: MARKET ====================
@@ -2309,11 +2605,11 @@ async def market_buy_amount_input(message: Message, state: FSMContext):
             raise ValueError
     except Exception:
         await state.clear()
-        await message.answer("❌ عدد مثبت. عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ عدد مثبت.", reply_markup=get_keyboard(uid)); return
     min_reserve = get_min_coin_reserve(user)
     if user["coins"] - coins < min_reserve:
         await state.clear()
-        await message.answer(f"❌ حداقل {format_coins(min_reserve)} باید تو کیف بمونه.", reply_markup=get_keyboard(uid)); return
+        await message.answer(f"❌ حداقل {format_coins(min_reserve)} بمونه.", reply_markup=get_keyboard(uid)); return
     market = get_market_data()
     price = market["currencies"][cid]["price"]
     amount_currency = coins / price
@@ -2321,8 +2617,7 @@ async def market_buy_amount_input(message: Message, state: FSMContext):
     await state.update_data(tr_type="market_buy", tr_cid=cid, tr_coins=coins)
     await state.set_state(UserForm.confirm_transfer)
     text = (f"💹 **تأیید خرید {cur['emoji']} {cur['name']}**\n\n"
-            f"💰 سرمایه: **{format_coins(coins)}**\n"
-            f"📊 قیمت: {format_market_price(price)}\n"
+            f"💰 **{format_coins(coins)}**\n📊 قیمت: {format_market_price(price)}\n"
             f"📦 مقدار: **{amount_currency:.4f}**\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
@@ -2347,7 +2642,7 @@ async def market_sell_amount_input(message: Message, state: FSMContext):
     h = holdings.get(cid)
     if not h or h.get("amount", 0) <= 0:
         await state.clear()
-        await message.answer("❌ این ارز رو نداری.", reply_markup=get_keyboard(uid)); return
+        await message.answer("❌ نداری.", reply_markup=get_keyboard(uid)); return
     txt = message.text.strip().replace(",", "")
     market = get_market_data()
     price = market["currencies"][cid]["price"]
@@ -2364,7 +2659,7 @@ async def market_sell_amount_input(message: Message, state: FSMContext):
                 raise ValueError
         except Exception:
             await state.clear()
-            await message.answer("❌ عدد مثبت یا «همه». عملیات لغو شد.", reply_markup=get_keyboard(uid)); return
+            await message.answer("❌ عدد مثبت یا «همه».", reply_markup=get_keyboard(uid)); return
         if coins_want > total_value:
             await state.clear()
             await message.answer(f"❌ حداکثر {format_coins(int(total_value))}", reply_markup=get_keyboard(uid)); return
@@ -2375,8 +2670,7 @@ async def market_sell_amount_input(message: Message, state: FSMContext):
                              tr_sell_amount=sell_amount, tr_coins_get=coins_get, tr_final_all=final_all)
     await state.set_state(UserForm.confirm_transfer)
     text = (f"💹 **تأیید فروش {cur['emoji']} {cur['name']}**\n\n"
-            f"📦 مقدار فروش: **{sell_amount:.4f}**\n"
-            f"💰 دریافت: **{format_coins(coins_get)}**\n\n⚠️ مطمئنی؟")
+            f"📦 **{sell_amount:.4f}**\n💰 دریافت: **{format_coins(coins_get)}**\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -2413,7 +2707,7 @@ async def on_successful_payment(message: Message, state: FSMContext):
         nc = user["coins"] + coins
         update_user(uid, {"coins": nc, "pet": PHOENIX_PET, "phoenix_owned": True, "pending_purchase": None})
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
-        await message.answer(f"✅ پرداخت موفق!\n🪙 +{format_coins(coins)}\n🦅 ققنوس!", reply_markup=get_keyboard(uid))
+        await message.answer(f"✅ پرداخت!\n🪙 +{format_coins(coins)}\n🦅 ققنوس!", reply_markup=get_keyboard(uid))
         return
     try:
         coins = int(parts[2])
@@ -2430,7 +2724,7 @@ async def on_successful_payment(message: Message, state: FSMContext):
         gm = f"\n✨ طلایی {FRUITS[fi]}"
     update_user(uid, {"coins": nc, "inventory": inv, "pending_purchase": None})
     update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
-    await message.answer(f"✅ پرداخت موفق!\n🪙 +{format_coins(coins)}\n💼 {format_coins(nc)}{gm}", reply_markup=get_keyboard(uid))
+    await message.answer(f"✅ پرداخت!\n🪙 +{format_coins(coins)}\n💼 {format_coins(nc)}{gm}", reply_markup=get_keyboard(uid))
 
 
 # ==================== GIFT CODES ====================
@@ -2453,14 +2747,14 @@ async def handle_gift_codes(message: Message, state: FSMContext):
     try:
         end = datetime.fromisoformat(cd["end_time"])
         if datetime.now() >= end:
-            await message.answer("❌ این گیفت کد منقضی شده."); return
+            await message.answer("❌ منقضی شده."); return
     except Exception:
         return
     if str(uid) in cd.get("used_by", []):
         await message.answer("❌ قبلاً استفاده کرده‌ای."); return
     mu = cd["max_users"]
     if mu != "all" and len(cd.get("used_by", [])) >= mu:
-        await message.answer("❌ ظرفیت پر شده."); return
+        await message.answer("❌ ظرفیت پر."); return
     user = get_user(uid)
     if not user:
         await message.answer("❌ اول /start"); return
@@ -2471,7 +2765,7 @@ async def handle_gift_codes(message: Message, state: FSMContext):
     data["gift_codes"][text] = cd
     save_data(data)
     update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
-    await message.answer(f"🎉 **تبریک!**\n✅ کد `{text}`\n💰 +{format_coins(amt)}\n💼 {format_coins(nc)}")
+    await message.answer(f"🎉 **تبریک!**\n✅ `{text}`\n💰 +{format_coins(amt)}\n💼 {format_coins(nc)}")
 
 
 # ==================== CLAN ACCEPT/REJECT ====================
@@ -2483,30 +2777,29 @@ async def clan_accept(callback: CallbackQuery):
     data = load_data()
     req = data.get("clan_requests", {}).get(target_id)
     if not req:
-        await safe_edit(callback, "❌ درخواست پیدا نشد."); return
+        await safe_edit(callback, "❌ پیدا نشد."); return
     cid = req["clan_id"]
     clan = data["clans"].get(cid)
     if not clan:
-        await safe_edit(callback, "❌ کلن پیدا نشد."); return
+        await safe_edit(callback, "❌ کلن."); return
     if clan["leader_id"] != str(leader_id):
-        await safe_edit(callback, "❌ شما لیدر این کلن نیستید."); return
+        await safe_edit(callback, "❌ لیدر نیستی."); return
     if len(clan["members"]) >= CLAN_MAX_MEMBERS.get(clan["level"], 10):
-        await safe_edit(callback, "❌ کلن پره."); return
+        await safe_edit(callback, "❌ پره."); return
     target_user = get_user(target_id)
     if not target_user:
-        await safe_edit(callback, "❌ کاربر پیدا نشد."); return
+        await safe_edit(callback, "❌ کاربر."); return
     if target_user.get("clan_id"):
-        await safe_edit(callback, "❌ کاربر در کلن دیگه‌ایه."); return
+        await safe_edit(callback, "❌ در کلنه."); return
     clan["members"].append(target_id)
     clan["member_names"][target_id] = target_user["name"]
-    data["clans"][cid] = clan
     data["users"][target_id]["clan_id"] = cid
     del data["clan_requests"][target_id]
     save_data(data)
-    await safe_edit(callback, f"✅ **{target_user['name']}** به کلن اضافه شد.", reply_markup=get_keyboard(leader_id))
+    await safe_edit(callback, f"✅ **{target_user['name']}** اضافه شد.", reply_markup=get_keyboard(leader_id))
     try:
         await bot.send_message(int(target_id),
-            f"🎉 **تبریک!**\n✅ به کلن **{clan['name']}** اضافه شدی!",
+            f"🎉 به کلن **{clan['name']}** اضافه شدی!",
             reply_markup=get_keyboard(int(target_id)))
     except Exception:
         pass
@@ -2520,10 +2813,10 @@ async def clan_reject(callback: CallbackQuery):
     req = data.get("clan_requests", {}).pop(target_id, None)
     save_data(data)
     if req:
-        await safe_edit(callback, "❌ درخواست رد شد.")
+        await safe_edit(callback, "❌ رد شد.")
         try:
             await bot.send_message(int(target_id),
-                f"❌ درخواست عضویت شما در کلن **{req['clan_name']}** رد شد.",
+                f"❌ درخواست رد شد.",
                 reply_markup=get_keyboard(int(target_id)))
         except Exception:
             pass
@@ -2540,20 +2833,18 @@ async def clan_request(callback: CallbackQuery):
     data = load_data()
     clan = data["clans"].get(cid)
     if not clan:
-        await safe_edit(callback, "❌ کلن پیدا نشد.", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, "❌ پیدا نشد.", reply_markup=get_keyboard(uid)); return
     if len(clan["members"]) >= CLAN_MAX_MEMBERS.get(clan["level"], 10):
-        await safe_edit(callback, "❌ کلن پر شده.", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, "❌ پره.", reply_markup=get_keyboard(uid)); return
     if str(uid) in clan["members"]:
-        await safe_edit(callback, "شما قبلاً عضو هستید.", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, "قبلاً عضو.", reply_markup=get_keyboard(uid)); return
     if user.get("clan_id"):
-        await safe_edit(callback, "❌ شما در کلن دیگه‌ای هستید.", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, "❌ در کلن دیگه‌ای.", reply_markup=get_keyboard(uid)); return
     data.setdefault("clan_requests", {})[str(uid)] = {
         "clan_id": cid, "clan_name": clan["name"], "user_name": user["name"],
-        "created_at": datetime.now().isoformat()
-    }
+        "created_at": datetime.now().isoformat()}
     save_data(data)
-    await safe_edit(callback, f"✅ درخواست شما به کلن **{clan['name']}** ارسال شد.\n⏳ منتظر تأیید لیدر باش.",
-        reply_markup=get_keyboard(uid))
+    await safe_edit(callback, f"✅ درخواست ارسال شد.", reply_markup=get_keyboard(uid))
     leader_id = clan["leader_id"]
     kb = InlineKeyboardBuilder()
     kb.button(f"✅ تأیید {user['name']}", callback_data=f"clan_accept_{uid}")
@@ -2561,13 +2852,13 @@ async def clan_request(callback: CallbackQuery):
     kb.adjust(2)
     try:
         await bot.send_message(int(leader_id),
-            f"🏰 **درخواست عضویت**\n\n👤 {user['name']}\n🆔 `{uid}`\n🏰 {clan['name']}\n\n✅ تأیید؟",
+            f"🏰 **درخواست عضویت**\n\n👤 {user['name']}\n🆔 `{uid}`\n🏰 {clan['name']}",
             reply_markup=kb.as_markup())
     except Exception as e:
         print(f"Error: {e}")
 
 
-# ==================== CONFIRM ====================
+# ==================== CONFIRM YES ====================
 @dp.callback_query(F.data == "confirm_yes")
 async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
     await safe_answer(callback)
@@ -2583,17 +2874,17 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         cname = d.get("tr_clan_name")
         if user["coins"] < amt:
             await state.clear()
-            await safe_edit(callback, "❌ موجودی کافی نیست.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ کمبود.", reply_markup=get_keyboard(uid)); return
         data = load_data()
         clan = data["clans"].get(cid)
         if not clan:
             await state.clear()
-            await safe_edit(callback, "❌ کلن پیدا نشد.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ کلن.", reply_markup=get_keyboard(uid)); return
         clan["treasury"] += amt
+        data["users"][str(uid)]["coins"] = user["coins"] - amt
         save_data(data)
-        update_user(uid, {"coins": user["coins"] - amt})
         await state.clear()
-        await safe_edit(callback, f"✅ **اهدا انجام شد!**\n🏰 {cname}\n💰 {format_coins(amt)}\n🏦 {format_coins(clan['treasury'])}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **اهدا!**\n🏰 {cname}\n💰 {format_coins(amt)}\n🏦 {format_coins(clan['treasury'])}", reply_markup=get_keyboard(uid))
     elif tr_type == "buy_land":
         mp = user.get("max_plots", 1)
         pr = get_land_price(mp)
@@ -2605,21 +2896,20 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_user(uid, {"coins": user["coins"] - pr, "plots": plots, "max_plots": mp + 1})
         update_leaderboard(uid, user["name"], user["coins"] - pr, user["level"], user["prestige"])
         await state.clear()
-        await safe_edit(callback, f"🎉 **زمین {mp+1} خریداری شد!**\n💰 {format_coins(pr)}\n💼 {format_coins(user['coins'] - pr)}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"🎉 **زمین {mp+1}!**\n💰 {format_coins(pr)}", reply_markup=get_keyboard(uid))
     elif tr_type == "upgrade":
         key = d.get("tr_key")
         cnt = d.get("tr_count", 0)
         cost = d.get("tr_cost", 0)
-        base = {"auto_water": 1000, "golden_pot": 2000, "professional_seeder": 5000}
-        if key not in base or user["coins"] < cost:
+        if key not in ["auto_water", "golden_pot", "professional_seeder"] or user["coins"] < cost:
             await state.clear()
             await safe_edit(callback, "❌ خطا.", reply_markup=get_keyboard(uid)); return
         u = user["upgrades"]
         u[key] = cnt + 1
         update_user(uid, {"coins": user["coins"] - cost, "upgrades": u})
         await state.clear()
-        names = {"auto_water": "آبیاری خودکار", "golden_pot": "گلدان طلایی", "professional_seeder": "بذرپاش"}
-        await safe_edit(callback, f"✅ **{names[key]}** ارتقاء یافت!\n💰 {format_coins(cost)}\n📈 تعداد: {cnt + 1}", reply_markup=get_keyboard(uid))
+        names = {"auto_water": "آبیاری", "golden_pot": "گلدان", "professional_seeder": "بذرپاش"}
+        await safe_edit(callback, f"✅ **{names[key]}** → سطح {cnt + 1}\n💰 {format_coins(cost)}", reply_markup=get_keyboard(uid))
     elif tr_type == "prestige":
         nx = user["prestige"] + 1
         p = PRESTIGE_PRICES.get(nx)
@@ -2638,7 +2928,6 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             nu["pet"] = PHOENIX_PET
         nu["last_seen_period"] = get_period_number()
         nu["current_period"] = get_period_number()
-        nu["used_gift_codes"] = user.get("used_gift_codes", [])
         old_acc = user.get("bank", {}).get("account_number")
         if old_acc:
             nu["bank"]["account_number"] = old_acc
@@ -2648,7 +2937,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         save_data(data)
         update_leaderboard(uid, user["name"], nu["coins"], 1, nx)
         await state.clear()
-        await safe_edit(callback, f"⭐ **تبریک! پرستیژ {nx}!**\nضریب جدید: {nu['prestige_multiplier']:.2f}x\n💰 سکه اولیه: {format_coins(nu['coins'])}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"⭐ **پرستیژ {nx}!**\nضریب: {nu['prestige_multiplier']:.2f}x\n💰 {format_coins(nu['coins'])}", reply_markup=get_keyboard(uid))
     elif tr_type == "spin":
         et = d.get("tr_egg_type")
         if et not in PET_EGGS:
@@ -2665,7 +2954,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
         await state.clear()
         tfa = {"sell": "سود", "speed": "سرعت", "xp": "XP"}
-        await safe_edit(callback, f"🥚 **{e['name']}** باز شد!\n\n{np['emoji']} **{np['name']}**\nقابلیت: +{np['value']}٪ {tfa[np['type']]}\n\n💰 {format_coins(nc)}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"🥚 **{e['name']}** باز شد!\n\n{np['emoji']} **{np['name']}**\n+{np['value']}٪ {tfa[np['type']]}\n💰 {format_coins(nc)}", reply_markup=get_keyboard(uid))
     elif tr_type == "plant":
         pidx = d.get("tr_plot_idx")
         fidx = d.get("tr_fruit_idx")
@@ -2675,13 +2964,11 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         if pidx >= len(plots):
             await state.clear(); return
         eff, _ = get_season_effects()
-        bp = int(PRICES[fidx][0] * user["prestige_multiplier"] * eff["buy_mult"])
+        bp = get_seed_price(fidx, user, eff)
         if user["coins"] < bp:
             await state.clear()
-            await safe_edit(callback, "❌ سکه کافی نیست.", reply_markup=get_keyboard(uid)); return
-        gt = GROWTH_TIMES[fidx] * eff["growth_mult"]
-        if user["upgrades"].get("auto_water", 0) > 0:
-            gt *= 0.8
+            await safe_edit(callback, "❌ کمبود.", reply_markup=get_keyboard(uid)); return
+        gt = GROWTH_TIMES[fidx] * eff["growth_mult"] * get_growth_mult(user)
         sb = get_pet_effect(user, "speed")
         if sb > 0:
             gt *= (1 - sb / 100)
@@ -2691,7 +2978,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         mi = int(gt)
         se = int((gt - mi) * 60)
         await state.clear()
-        await safe_edit(callback, f"🌱 {FRUITS[fidx]} کاشته شد!\n⏳ {mi}:{se:02d}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"🌱 {FRUITS[fidx]}!\n⏳ {mi}:{se:02d}", reply_markup=get_keyboard(uid))
     elif tr_type == "worker_plant":
         fi = d.get("tr_fruit")
         h = d.get("tr_hours")
@@ -2705,7 +2992,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_user(uid, {"coins": user["coins"] - cost, "workers": workers})
         update_leaderboard(uid, user["name"], user["coins"] - cost, user["level"], user["prestige"])
         await state.clear()
-        await safe_edit(callback, f"✅ **کارگر کاشت اجاره شد!**\n🍎 {FRUITS[fi]}\n⏰ {h} ساعت\n💰 {format_coins(cost)}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **کارگر کاشت!**\n🍎 {FRUITS[fi]}\n⏰ {h}h\n💰 {format_coins(cost)}", reply_markup=get_keyboard(uid))
     elif tr_type == "worker_harvest":
         h = d.get("tr_hours")
         if h is None:
@@ -2715,7 +3002,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         workers["harvest_sell"] = {"active": True, "hours": h, "expires_at": expires.isoformat(), "paused": False, "paused_at": None}
         update_user(uid, {"workers": workers})
         await state.clear()
-        await safe_edit(callback, f"✅ **کارگر برداشت و فروش اجاره شد!**\n⏰ {h} ساعت\n📊 کمیسیون ۲۰٪", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **کارگر برداشت/فروش!**\n⏰ {h}h", reply_markup=get_keyboard(uid))
     elif tr_type == "fire_worker":
         wk = d.get("tr_wk")
         if wk not in ["planting", "harvest_sell"]:
@@ -2724,8 +3011,8 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         workers[wk] = {"active": False, "fruit": None, "hours": 0, "expires_at": None, "paused": False, "paused_at": None}
         update_user(uid, {"workers": workers})
         await state.clear()
-        name = "کاشت" if wk == "planting" else "برداشت و فروش"
-        await safe_edit(callback, f"🚪 کارگر {name} اخراج شد.", reply_markup=get_keyboard(uid))
+        name = "کاشت" if wk == "planting" else "برداشت/فروش"
+        await safe_edit(callback, f"🚪 اخراج شد.", reply_markup=get_keyboard(uid))
     elif tr_type == "clan_disband":
         cid = user.get("clan_id")
         if not cid:
@@ -2737,11 +3024,12 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             await state.clear()
             await safe_edit(callback, "❌ خطا.", reply_markup=get_keyboard(uid)); return
         for m in clan["members"]:
-            update_user(int(m), {"clan_id": None})
+            if m in data["users"]:
+                data["users"][m]["clan_id"] = None
         del data["clans"][cid]
         save_data(data)
         await state.clear()
-        await safe_edit(callback, "🗑 کلن منحل شد.", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, "🗑 منحل شد.", reply_markup=get_keyboard(uid))
     elif tr_type == "clan_leave":
         cid = user.get("clan_id")
         if not cid:
@@ -2753,10 +3041,10 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             if str(uid) in clan["members"]:
                 clan["members"].remove(str(uid))
             clan["member_names"].pop(str(uid), None)
-            save_data(data)
-        update_user(uid, {"clan_id": None})
+        data["users"][str(uid)]["clan_id"] = None
+        save_data(data)
         await state.clear()
-        await safe_edit(callback, "🚪 از کلن خارج شدی.", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, "🚪 خارج شدی.", reply_markup=get_keyboard(uid))
     elif tr_type == "clan_upgrade":
         cid = user.get("clan_id")
         cost = d.get("tr_cost", 0)
@@ -2770,10 +3058,9 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             await safe_edit(callback, "❌ خطا.", reply_markup=get_keyboard(uid)); return
         clan["level"] = nx
         clan["treasury"] -= cost
-        data["clans"][cid] = clan
         save_data(data)
         await state.clear()
-        await safe_edit(callback, f"✅ کلن به لول {nx} ارتقاء یافت!", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ کلن → لول {nx}!", reply_markup=get_keyboard(uid))
     elif tr_type == "buy_shop":
         amount = d.get("tr_amount")
         coins = d.get("tr_coins")
@@ -2791,13 +3078,8 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
                 pl = f"shop_{amount}_{coins}"
                 ti = format_coins(coins)
                 de = f"{amount:,} تومان"
-            kwargs = dict(
-                chat_id=uid,
-                title=ti,
-                description=de,
-                payload=pl,
-                provider_token=PROVIDER_TOKEN,
-            )
+            kwargs = dict(chat_id=uid, title=ti, description=de,
+                          payload=pl, provider_token=PROVIDER_TOKEN)
             if HAS_LABELED_PRICE:
                 kwargs["prices"] = [LabeledPrice(label=format_coins(coins), amount=r)]
             else:
@@ -2806,7 +3088,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         except Exception as e:
             print(f"Invoice error: {e}")
             try:
-                await bot.send_message(uid, f"❌ خطا در ارسال فاکتور:\n`{str(e)[:200]}`")
+                await bot.send_message(uid, f"❌ خطا:\n`{str(e)[:200]}`")
             except Exception:
                 pass
     elif tr_type == "market_buy":
@@ -2817,7 +3099,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             await safe_edit(callback, "❌ خطا.", reply_markup=get_keyboard(uid)); return
         if user["coins"] < coins:
             await state.clear()
-            await safe_edit(callback, "❌ موجودی کافی نیست.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ کمبود.", reply_markup=get_keyboard(uid)); return
         market = get_market_data()
         price = market["currencies"][cid]["price"]
         amount_currency = coins / price
@@ -2830,7 +3112,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_leaderboard(uid, user["name"], user["coins"] - coins, user["level"], user["prestige"])
         cur = MARKET_CURRENCIES[cid]
         await state.clear()
-        await safe_edit(callback, f"✅ **خرید موفق!**\n\n{cur['emoji']} {cur['name']}\n💰 سرمایه: {format_coins(coins)}\n📦 مقدار: **{amount_currency:.4f}**\n📊 قیمت: {format_market_price(price)}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **خرید!**\n\n{cur['emoji']} {cur['name']}\n💰 {format_coins(coins)}\n📦 {amount_currency:.4f}\n📊 {format_market_price(price)}", reply_markup=get_keyboard(uid))
     elif tr_type == "market_sell":
         cid = d.get("tr_cid")
         sell_amount = d.get("tr_sell_amount", 0)
@@ -2857,14 +3139,14 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
         cur = MARKET_CURRENCIES[cid]
         await state.clear()
-        await safe_edit(callback, f"✅ **فروش موفق!**\n\n{cur['emoji']} {cur['name']}\n📦 مقدار فروش: **{sell_amount:.4f}**\n💰 دریافت: **{format_coins(coins_get)}**\n💼 موجودی جدید: {format_coins(nc)}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **فروش!**\n\n{cur['emoji']} {cur['name']}\n📦 {sell_amount:.4f}\n💰 {format_coins(coins_get)}\n💼 {format_coins(nc)}", reply_markup=get_keyboard(uid))
     elif tr_type == "bank_deposit":
         amt = d.get("tr_amount", 0)
         final_amount = d.get("tr_final", 0)
         commission = d.get("tr_commission", 0)
         if user["coins"] < amt:
             await state.clear()
-            await safe_edit(callback, "❌ موجودی کافی نیست.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ کمبود.", reply_markup=get_keyboard(uid)); return
         bank = user.get("bank", create_default_bank())
         bank["balance"] = bank.get("balance", 0) + final_amount
         history = bank.get("history", [])
@@ -2874,13 +3156,13 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_user(uid, {"coins": user["coins"] - amt, "bank": bank})
         update_leaderboard(uid, user["name"], user["coins"] - amt, user["level"], user["prestige"])
         await state.clear()
-        await safe_edit(callback, f"✅ **سپرده‌گذاری انجام شد!**\n💰 واریز شده: {format_coins(amt)}\n📊 کمیسیون: {format_coins(commission)}\n🏦 موجودی بانک: {format_coins(bank['balance'])}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **سپرده!**\n💰 {format_coins(amt)}\n📊 کمیسیون: {format_coins(commission)}\n🏦 {format_coins(bank['balance'])}", reply_markup=get_keyboard(uid))
     elif tr_type == "bank_withdraw":
         amt = d.get("tr_amount", 0)
         bank = user.get("bank", create_default_bank())
         if bank.get("balance", 0) < amt:
             await state.clear()
-            await safe_edit(callback, "❌ موجودی بانک کافی نیست.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ کمبود.", reply_markup=get_keyboard(uid)); return
         bank["balance"] -= amt
         history = bank.get("history", [])
         history.append({"type": "withdraw", "amount": amt, "time": datetime.now().isoformat()})
@@ -2889,7 +3171,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         update_user(uid, {"coins": nc, "bank": bank})
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
         await state.clear()
-        await safe_edit(callback, f"✅ **برداشت انجام شد!**\n💰 مبلغ: {format_coins(amt)}\n🏦 موجودی بانک: {format_coins(bank['balance'])}\n💼 موجودی کیف: {format_coins(nc)}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **برداشت!**\n💰 {format_coins(amt)}\n🏦 {format_coins(bank['balance'])}\n💼 {format_coins(nc)}", reply_markup=get_keyboard(uid))
     elif tr_type == "bank_transfer":
         tid = d.get("tr_target_id")
         tname = d.get("tr_target_name")
@@ -2898,24 +3180,23 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         target = get_user(tid) if tid else None
         if not target:
             await state.clear()
-            await safe_edit(callback, "❌ کاربر پیدا نشد.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ پیدا نشد.", reply_markup=get_keyboard(uid)); return
         bank = user.get("bank", create_default_bank())
         if bank.get("balance", 0) < amt:
             await state.clear()
-            await safe_edit(callback, "❌ موجودی کافی نیست.", reply_markup=get_keyboard(uid)); return
-        bank["balance"] -= amt
-        history = bank.get("history", [])
-        history.append({"type": "transfer_out", "amount": amt, "to": tname, "to_acc": acc, "time": datetime.now().isoformat()})
-        bank["history"] = history[-50:]
-        update_user(uid, {"bank": bank})
-        tbank = target.get("bank", create_default_bank())
-        tbank["balance"] = tbank.get("balance", 0) + amt
-        th = tbank.get("history", [])
-        th.append({"type": "transfer_in", "amount": amt, "from": user.get("name", "?"), "time": datetime.now().isoformat()})
-        tbank["history"] = th[-50:]
-        update_user(int(tid), {"bank": tbank})
+            await safe_edit(callback, "❌ کمبود.", reply_markup=get_keyboard(uid)); return
+        data = load_data()
+        data["users"][str(uid)]["bank"]["balance"] -= amt
+        th = data["users"][str(uid)]["bank"].setdefault("history", [])
+        th.append({"type": "transfer_out", "amount": amt, "to": tname, "to_acc": acc, "time": datetime.now().isoformat()})
+        data["users"][str(uid)]["bank"]["history"] = th[-50:]
+        data["users"][tid]["bank"]["balance"] = data["users"][tid].get("bank", {}).get("balance", 0) + amt
+        ri = data["users"][tid]["bank"].setdefault("history", [])
+        ri.append({"type": "transfer_in", "amount": amt, "from": user.get("name", "?"), "time": datetime.now().isoformat()})
+        data["users"][tid]["bank"]["history"] = ri[-50:]
+        save_data(data)
         await state.clear()
-        await safe_edit(callback, f"✅ **انتقال انجام شد!**\n👤 به: {tname}\n🆔 حساب: `{acc}`\n💰 مبلغ: {format_coins(amt)}\n🏦 موجودی شما: {format_coins(bank['balance'])}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **انتقال!**\n👤 {tname}\n💰 {format_coins(amt)}\n🏦 {format_coins(data['users'][str(uid)]['bank']['balance'])}", reply_markup=get_keyboard(uid))
     elif tr_type == "bank_loan":
         amt = d.get("tr_amount", 0)
         hours = d.get("tr_hours", 1)
@@ -2923,26 +3204,22 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         bank = user.get("bank", create_default_bank())
         if bank.get("loan"):
             await state.clear()
-            await safe_edit(callback, "❌ شما وام فعال دارید.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ وام فعال.", reply_markup=get_keyboard(uid)); return
         period_end = get_period_end_datetime(user.get("current_period", 1))
         if period_end:
             loan_end = datetime.now() + timedelta(hours=hours)
             if loan_end > period_end:
                 await state.clear()
-                await safe_edit(callback, "❌ در حال حاضر امکان وام گرفتن وجود ندارد. لطفاً بعد از اتمام دوره تلاش کنید.", reply_markup=get_keyboard(uid)); return
+                await safe_edit(callback, "❌ بعد از اتمام دوره.", reply_markup=get_keyboard(uid)); return
         due_time = datetime.now() + timedelta(hours=hours)
-        bank["loan"] = {
-            "amount": amt,
-            "total_due": total_due,
-            "start_time": datetime.now().isoformat(),
-            "due_time": due_time.isoformat(),
-            "warning_sent": False,
-        }
+        bank["loan"] = {"amount": amt, "total_due": total_due,
+                        "start_time": datetime.now().isoformat(),
+                        "due_time": due_time.isoformat(), "warning_sent": False}
         nc = user["coins"] + amt
         update_user(uid, {"coins": nc, "bank": bank})
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
         await state.clear()
-        await safe_edit(callback, f"✅ **وام اعطا شد!**\n💰 مبلغ: {format_coins(amt)}\n⏰ سررسید: {hours} ساعت دیگه\n💵 بازپرداخت: {format_coins(total_due)}\n\n⚠️ حتماً به موقع پرداخت کن!", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **وام!**\n💰 {format_coins(amt)}\n⏰ {hours}h\n💵 {format_coins(total_due)}", reply_markup=get_keyboard(uid))
     else:
         await state.clear()
         await safe_edit(callback, "❌ خطا.", reply_markup=get_keyboard(uid))
@@ -2953,7 +3230,7 @@ async def confirm_transfer_no(callback: CallbackQuery, state: FSMContext):
     await safe_answer(callback)
     uid = callback.from_user.id
     await state.clear()
-    await safe_edit(callback, "❌ **عملیات لغو شد.**", reply_markup=get_keyboard(uid))
+    await safe_edit(callback, "❌ **لغو شد.**", reply_markup=get_keyboard(uid))
 
 
 # ==================== MAIN CALLBACK ====================
@@ -2965,7 +3242,10 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         return
     raw_data = callback.data or ""
     cur_state = await state.get_state()
-    if cur_state is not None and raw_data not in ["confirm_yes", "confirm_no"] and not raw_data.startswith("clan_accept_") and not raw_data.startswith("clan_reject_") and not raw_data.startswith("clan_req_") and not raw_data.startswith("market_cid_") and not raw_data.startswith("market_sell_cid_"):
+    if cur_state is not None and raw_data not in ["confirm_yes", "confirm_no"] \
+            and not raw_data.startswith("clan_accept_") and not raw_data.startswith("clan_reject_") \
+            and not raw_data.startswith("clan_req_") and not raw_data.startswith("market_cid_") \
+            and not raw_data.startswith("market_sell_cid_"):
         await state.clear()
     if raw_data.startswith("owner_"):
         parts = raw_data.split("_", 2)
@@ -2984,6 +3264,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         if raw_data.startswith("clan_accept_") or raw_data.startswith("clan_reject_") or raw_data.startswith("clan_req_"):
             return
         data = raw_data
+
     check_all_harvests(uid)
     process_workers(uid)
     check_period_reset(uid)
@@ -2992,7 +3273,8 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     user = get_user(uid)
     if not user:
         return
-    # چک زندان
+
+    # jail check
     if user.get("bank", {}).get("in_jail") and not data.startswith("jail_"):
         bank = user.get("bank", {})
         jail_until_str = bank.get("jail_until")
@@ -3008,13 +3290,16 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             bank["jail_until"] = None
             bank["jail_work_count"] = 0
             bank["jail_ready_to_pay"] = False
+            if bank.get("jail_reason") == "loan_overdue":
+                bank["loan_banned_until"] = (datetime.now() + timedelta(days=7)).isoformat()
+                bank["jail_reason"] = None
             new_coins = get_initial_coins_for_prestige(user)
             update_user(uid, {"bank": bank, "coins": new_coins})
             user = get_user(uid)
         else:
             await show_jail_page(callback, user, uid)
             return
-    # ===== بازار =====
+
     if data.startswith("market_cid_"):
         cid = data.replace("market_cid_", "")
         if cid not in MARKET_CURRENCIES:
@@ -3026,10 +3311,8 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         await state.set_state(UserForm.market_buy_amount)
         await safe_edit(callback,
             f"💹 **خرید {cur['emoji']} {cur['name']}**\n\n"
-            f"📊 قیمت لحظه‌ای: **{format_market_price(price)}** سکه\n\n"
-            f"💰 مقدار **سکه**‌ای که می‌خوای سرمایه‌گذاری کنی رو وارد کن:\n"
-            f"(مثلاً اگه `100` بفرستی، یعنی ۱۰۰ سکه {cur['name']} می‌خری)\n\n"
-            f"❌ برای لغو /cancel بزن.",
+            f"📊 قیمت: **{format_market_price(price)}**\n\n"
+            f"💰 مقدار **سکه** رو وارد کن:\n❌ /cancel",
             reply_markup=get_keyboard(uid))
         return
     if data.startswith("market_sell_cid_"):
@@ -3039,7 +3322,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         holdings = user.get("market_holdings", {})
         h = holdings.get(cid)
         if not h or h.get("amount", 0) <= 0:
-            await safe_edit(callback, "❌ این ارز رو نداری.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ نداری.", reply_markup=get_keyboard(uid)); return
         cur = MARKET_CURRENCIES[cid]
         market = get_market_data()
         price = market["currencies"][cid]["price"]
@@ -3048,15 +3331,13 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         await state.set_state(UserForm.market_sell_amount)
         await safe_edit(callback,
             f"💹 **فروش {cur['emoji']} {cur['name']}**\n\n"
-            f"📦 دارایی: **{h['amount']:.4f}** {cur['name']}\n"
-            f"📊 قیمت لحظه‌ای: **{format_market_price(price)}** سکه\n"
-            f"💰 ارزش کل: **{format_coins(int(total_value))}**\n\n"
-            f"💰 مقدار **سکه**‌ای که می‌خوای بفروشی رو وارد کن\n"
-            f"یا کلمه‌ی **«همه»** رو بفرست.\n\n"
-            f"❌ برای لغو /cancel بزن.",
+            f"📦 {h['amount']:.4f}\n"
+            f"📊 {format_market_price(price)}\n"
+            f"💰 ارزش: **{format_coins(int(total_value))}**\n\n"
+            f"مقدار سکه یا «همه» رو بفرست.\n❌ /cancel",
             reply_markup=get_keyboard(uid))
         return
-    # ===== جیل =====
+
     if data == "jail_work":
         bank = user.get("bank", {})
         last_work_str = bank.get("jail_last_work")
@@ -3069,8 +3350,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             except Exception:
                 pass
         if not can_work:
-            await safe_edit(callback, "⏳ هنوز وقت کار کردن نشده.", reply_markup=get_keyboard(uid))
-            return
+            await safe_edit(callback, "⏳ نه هنوز.", reply_markup=get_keyboard(uid)); return
         bank["jail_work_count"] = bank.get("jail_work_count", 0) + 1
         bank["jail_last_work"] = datetime.now().isoformat()
         if bank["jail_work_count"] >= bank.get("jail_target_works", 15):
@@ -3086,31 +3366,33 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         bank["jail_work_count"] = 0
         bank["jail_ready_to_pay"] = False
         bank["loan"] = None
+        if bank.get("jail_reason") == "loan_overdue":
+            bank["loan_banned_until"] = (datetime.now() + timedelta(days=7)).isoformat()
+            bank["jail_reason"] = None
         new_coins = get_initial_coins_for_prestige(user)
         update_user(uid, {"bank": bank, "coins": new_coins})
         user = get_user(uid)
         await safe_edit(callback,
-            f"🎉 **آزاد شدی!**\n\nحسابت ریست شد. سکه جدید: {format_coins(new_coins)}",
+            f"🎉 **آزاد شدی!**\n💰 {format_coins(new_coins)}",
             reply_markup=get_keyboard(uid))
         return
-    # ===== پرداخت وام (قبلاً کار نمی‌کرد) =====
     if data == "pay_loan_yes":
         bank = user.get("bank", {})
         loan = bank.get("loan")
         if not loan:
-            await safe_edit(callback, "❌ وام فعالی نداری.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ وام نداری.", reply_markup=get_keyboard(uid)); return
         total_due = loan.get("total_due", 0)
         if user["coins"] < total_due:
             await safe_edit(callback,
-                f"❌ سکه کافی برای پرداخت نداری!\n💰 موجودی: {format_coins(user['coins'])}\n💵 نیاز: {format_coins(total_due)}",
+                f"❌ کمبود!\n💰 {format_coins(user['coins'])}\n💵 {format_coins(total_due)}",
                 reply_markup=get_keyboard(uid)); return
         nc = user["coins"] - total_due
         bank["loan"] = None
         update_user(uid, {"coins": nc, "bank": bank})
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
-        await safe_edit(callback, f"✅ **وام پرداخت شد!**\n💰 {format_coins(total_due)}\n💼 موجودی: {format_coins(nc)}", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, f"✅ **وام پرداخت شد!**\n💰 {format_coins(total_due)}\n💼 {format_coins(nc)}", reply_markup=get_keyboard(uid))
         return
-    # ===== معمولی =====
+
     if data == "noop":
         return
     elif data == "status":
@@ -3118,7 +3400,6 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     elif data == "admin_panel":
         await show_admin_panel(callback, uid)
     elif data == "bank_menu":
-        # اطمینان از شماره حساب
         user = ensure_account_number(uid, user)
         await show_bank_menu(callback, user, uid)
     elif data == "bank_account":
@@ -3126,13 +3407,13 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         await show_bank_account(callback, user, uid)
     elif data == "bank_deposit":
         await state.set_state(UserForm.bank_deposit_amount)
-        await safe_edit(callback, "💰 مقدار سکه‌ای که می‌خوای سپرده کنی رو وارد کن:\n(۵٪ کمیسیون)\n\n❌ برای لغو /cancel بزن.", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, "💰 مقدار سپرده:\n(۵٪ کمیسیون)\n❌ /cancel", reply_markup=get_keyboard(uid))
     elif data == "bank_withdraw":
         await state.set_state(UserForm.bank_withdraw_amount)
-        await safe_edit(callback, "💰 مقدار سکه‌ای که می‌خوای برداشت کنی رو وارد کن:\n(یا «همه»)\n\n❌ برای لغو /cancel بزن.", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, "💰 مقدار برداشت (یا «همه»):\n❌ /cancel", reply_markup=get_keyboard(uid))
     elif data == "bank_transfer":
         await state.set_state(UserForm.bank_transfer_target)
-        await safe_edit(callback, "🆔 شماره حساب ۶ رقمی مقصد رو وارد کن:\n\n❌ برای لغو /cancel بزن.", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, "🆔 شماره حساب ۶ رقمی:\n❌ /cancel", reply_markup=get_keyboard(uid))
     elif data == "bank_loan":
         await show_bank_loan(callback, user, uid, state)
     elif data == "bank_pay_loan":
@@ -3153,14 +3434,13 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         mp = user.get("max_plots", 1)
         pr = get_land_price(mp)
         if pr is None:
-            await safe_edit(callback, "✅ حداکثر زمین‌ها را داری.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "✅ حداکثر داری.", reply_markup=get_keyboard(uid)); return
         if user["coins"] < pr:
-            await safe_edit(callback, f"❌ سکه کافی نیست! نیاز: {format_coins(pr)}", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, f"❌ نیاز: {format_coins(pr)}", reply_markup=get_keyboard(uid)); return
         await state.update_data(tr_type="buy_land")
         await state.set_state(UserForm.confirm_transfer)
-        text = (f"🏞️ **تأیید خرید زمین {mp+1}**\n\n"
-                f"💰 هزینه: **{format_coins(pr)}**\n"
-                f"💼 بعد از خرید: {format_coins(user['coins'] - pr)}\n\n⚠️ مطمئنی؟")
+        text = (f"🏞️ **خرید زمین {mp+1}**\n\n💰 **{format_coins(pr)}**\n"
+                f"💼 بعد: {format_coins(user['coins'] - pr)}\n\n⚠️ مطمئنی؟")
         kb = InlineKeyboardBuilder()
         kb.button("✅ تأیید", callback_data="confirm_yes")
         kb.button("❌ لغو", callback_data="confirm_no")
@@ -3237,7 +3517,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         await state.update_data(wp_fruit=fruit_idx)
         await state.set_state(UserForm.worker_plant_hours)
         await safe_edit(callback,
-            f"🌱 میوه: **{FRUITS[fruit_idx]}**\n\n⏰ چند ساعت؟ (عدد بفرست، مثلاً `5`)\nحداکثر: ۷۲\n\n❌ برای لغو /cancel بزن.",
+            f"🌱 **{FRUITS[fruit_idx]}**\n\n⏰ چند ساعت؟ (۱-۷۲)\n❌ /cancel",
             reply_markup=get_keyboard(uid))
     elif data == "prestige_menu":
         await show_prestige(callback, user, uid)
@@ -3257,27 +3537,25 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         await show_clan_leaderboard(callback, user, uid)
     elif data == "clan_invite":
         await state.set_state(UserForm.clan_invite)
-        await safe_edit(callback, "👤 نام یا کد کاربر:\n\n❌ برای لغو /cancel بزن.", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, "👤 نام یا کد:\n❌ /cancel", reply_markup=get_keyboard(uid))
     elif data == "clan_donate":
         await state.set_state(UserForm.clan_donate)
-        await safe_edit(callback, "💰 مقدار سکه (حداقل ۱۰,۰۰۰):\n\n❌ برای لغو /cancel بزن.", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, "💰 مقدار (حداقل ۱۰,۰۰۰):\n❌ /cancel", reply_markup=get_keyboard(uid))
     elif data == "clan_chat":
         await state.set_state(UserForm.clan_chat)
-        await safe_edit(callback, "✉️ پیام برای اعضا:\n\n❌ برای لغو /cancel بزن.", reply_markup=get_keyboard(uid))
+        await safe_edit(callback, "✉️ پیام:\n❌ /cancel", reply_markup=get_keyboard(uid))
     elif data == "clan_upgrade":
         c = get_clan(user["clan_id"])
         if not c or c["level"] >= 10:
-            await safe_edit(callback, "❌ حداکثر لول!", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ حداکثر!", reply_markup=get_keyboard(uid)); return
         nx = c["level"] + 1
         cost = CLAN_LEVEL_COSTS[nx]
         if c["treasury"] < cost:
-            await safe_edit(callback, f"❌ نیاز خزانه: {format_coins(cost)}", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, f"❌ نیاز: {format_coins(cost)}", reply_markup=get_keyboard(uid)); return
         await state.update_data(tr_type="clan_upgrade", tr_cost=cost, tr_next_level=nx)
         await state.set_state(UserForm.confirm_transfer)
-        text = (f"⬆️ **تأیید ارتقاء کلن**\n\n"
-                f"📊 از لول {c['level']} به {nx}\n"
-                f"💰 هزینه: {format_coins(cost)}\n"
-                f"🏦 خزانه: {format_coins(c['treasury'])}\n\n⚠️ مطمئنی؟")
+        text = (f"⬆️ **ارتقاء کلن**\n\nلول {c['level']} → {nx}\n"
+                f"💰 {format_coins(cost)}\n🏦 {format_coins(c['treasury'])}\n\n⚠️ مطمئنی؟")
         kb = InlineKeyboardBuilder()
         kb.button("✅ تأیید", callback_data="confirm_yes")
         kb.button("❌ لغو", callback_data="confirm_no")
@@ -3286,12 +3564,12 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     elif data == "clan_leave":
         c = get_clan(user["clan_id"])
         if not c:
-            await safe_edit(callback, "❌ کلن نداری.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ نداری.", reply_markup=get_keyboard(uid)); return
         if c["leader_id"] == str(uid):
-            await safe_edit(callback, "❌ لیدر نمی‌تواند خارج شود.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ لیدر نمی‌تونه.", reply_markup=get_keyboard(uid)); return
         await state.update_data(tr_type="clan_leave")
         await state.set_state(UserForm.confirm_transfer)
-        text = f"🚪 **تأیید خروج از کلن**\n\n🏰 {c['name']}\n\n⚠️ مطمئنی؟"
+        text = f"🚪 **خروج از {c['name']}؟**"
         kb = InlineKeyboardBuilder()
         kb.button("✅ تأیید", callback_data="confirm_yes")
         kb.button("❌ لغو", callback_data="confirm_no")
@@ -3300,16 +3578,15 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
     elif data == "clan_disband":
         c = get_clan(user["clan_id"])
         if not c:
-            await safe_edit(callback, "❌ کلن نداری.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ نداری.", reply_markup=get_keyboard(uid)); return
         if c["leader_id"] != str(uid):
-            await safe_edit(callback, "❌ فقط لیدر می‌تواند.", reply_markup=get_keyboard(uid)); return
+            await safe_edit(callback, "❌ فقط لیدر.", reply_markup=get_keyboard(uid)); return
         await state.update_data(tr_type="clan_disband")
         await state.set_state(UserForm.confirm_transfer)
-        text = (f"🗑 **تأیید منحل کردن کلن**\n\n"
-                f"🏰 {c['name']}\n👥 {len(c['members'])} عضو\n💰 {format_coins(c['treasury'])}\n\n"
-                f"⚠️ **این عملیات قابل بازگشت نیست!**\n\nمطمئنی؟")
+        text = (f"🗑 **منحل کردن کلن**\n\n🏰 {c['name']}\n👥 {len(c['members'])}\n💰 {format_coins(c['treasury'])}\n\n"
+                f"⚠️ **قابل بازگشت نیست!**")
         kb = InlineKeyboardBuilder()
-        kb.button("✅ تأیید حذف", callback_data="confirm_yes")
+        kb.button("✅ تأیید", callback_data="confirm_yes")
         kb.button("❌ لغو", callback_data="confirm_no")
         kb.adjust(2)
         await safe_edit(callback, text, reply_markup=kb.as_markup())
@@ -3321,7 +3598,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         await safe_edit(callback, "🔙 منوی اصلی", reply_markup=get_keyboard(uid))
 
 
-# ==================== WORKER PAUSE/FIRE ====================
+# ==================== WORKER HELPERS ====================
 async def toggle_worker_pause(callback, user, uid, wk):
     data = load_data()
     u = data["users"].get(str(uid))
@@ -3330,7 +3607,7 @@ async def toggle_worker_pause(callback, user, uid, wk):
     workers = u.get("workers", {})
     w = workers.get(wk, {})
     if not w.get("active"):
-        await safe_edit(callback, "❌ این کارگر فعال نیست.", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, "❌ فعال نیست.", reply_markup=get_keyboard(uid)); return
     if w.get("paused"):
         paused_at = w.get("paused_at")
         if paused_at:
@@ -3348,10 +3625,9 @@ async def toggle_worker_pause(callback, user, uid, wk):
         w["paused_at"] = datetime.now().isoformat()
     workers[wk] = w
     u["workers"] = workers
-    data["users"][str(uid)] = u
     save_data(data)
-    status = "متوقف شد ⏸" if w["paused"] else "فعال شد ▶️"
-    name = "کاشت" if wk == "planting" else "برداشت و فروش"
+    status = "متوقف ⏸" if w["paused"] else "فعال ▶️"
+    name = "کاشت" if wk == "planting" else "برداشت/فروش"
     await safe_edit(callback, f"✅ کارگر {name} {status}.", reply_markup=get_keyboard(uid))
 
 
@@ -3359,13 +3635,11 @@ async def fire_worker(callback, user, uid, wk, state):
     workers = user.get("workers", {})
     w = workers.get(wk, {})
     if not w.get("active"):
-        await safe_edit(callback, "❌ این کارگر فعال نیست.", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, "❌ فعال نیست.", reply_markup=get_keyboard(uid)); return
     await state.update_data(tr_type="fire_worker", tr_wk=wk)
     await state.set_state(UserForm.confirm_transfer)
-    name = "کاشت" if wk == "planting" else "برداشت و فروش"
-    text = (f"🚪 **اخراج کارگر {name}**\n\n"
-            f"⚠️ پولی که پرداخت کردی برنمی‌گرده!\n\n"
-            f"آیا مطمئنی؟")
+    name = "کاشت" if wk == "planting" else "برداشت/فروش"
+    text = f"🚪 **اخراج کارگر {name}**\n\n⚠️ پول برنمی‌گرده!\n\nمطمئنی؟"
     kb = InlineKeyboardBuilder()
     kb.button("✅ اخراج", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -3380,7 +3654,7 @@ async def show_admin_panel(callback, uid):
     kb = InlineKeyboardBuilder()
     kb.button("🔙 بازگشت", callback_data="back")
     kb.adjust(1)
-    await safe_edit(callback, "👑 **پنل ادمین**\n\n/admin برای لیست کامل.", reply_markup=kb.as_markup())
+    await safe_edit(callback, "👑 **پنل ادمین**\n\n/admin برای لیست.", reply_markup=kb.as_markup())
 
 
 async def show_main_menu(message: Message):
@@ -3418,35 +3692,42 @@ async def edit_status(callback, user, uid):
     await safe_edit(callback, build_status_text(user, uid), reply_markup=get_keyboard(uid))
 
 
-# ==================== BANK SHOW ====================
 async def show_bank_menu(callback, user, uid):
-    # چک و تولید شماره حساب ✅
     user = ensure_account_number(uid, user)
     bank = user.get("bank", create_default_bank())
     acc = bank.get("account_number") or "—"
     has_loan = bool(bank.get("loan"))
     text = (f"🏦 **بانک**\n\n"
-            f"🆔 شماره حساب: `{acc}`\n"
-            f"💰 موجودی سپرده: **{format_coins(bank.get('balance', 0))}**\n"
-            f"💼 موجودی کیف: {format_coins(user['coins'])}\n"
+            f"🆔 حساب: `{acc}`\n"
+            f"💰 سپرده: **{format_coins(bank.get('balance', 0))}**\n"
+            f"💼 کیف: {format_coins(user['coins'])}\n"
             f"📊 سود روزانه: **۱۰٪**\n")
     if has_loan:
         loan = bank["loan"]
         try:
             due = datetime.fromisoformat(loan["due_time"])
             rem = (due - datetime.now()).total_seconds()
-            text += f"\n⚠️ **وام فعال:** {format_coins(loan['amount'])}\n"
+            text += f"\n⚠️ **وام:** {format_coins(loan['amount'])}\n"
             text += f"💵 بازپرداخت: {format_coins(loan['total_due'])}\n"
-            text += f"⏰ سررسید: {format_time_remaining(rem)} دیگه\n"
+            text += f"⏰ سررسید: {format_time_remaining(rem)}\n"
+        except Exception:
+            pass
+    banned = bank.get("loan_banned_until")
+    if banned:
+        try:
+            bu = datetime.fromisoformat(banned)
+            if datetime.now() < bu:
+                rem = (bu - datetime.now()).total_seconds()
+                text += f"\n🚫 منع وام: {format_time_remaining(rem)}\n"
         except Exception:
             pass
     kb = InlineKeyboardBuilder()
-    kb.button("📋 حساب بانکی", callback_data=f"owner_{uid}_bank_account")
+    kb.button("📋 حساب", callback_data=f"owner_{uid}_bank_account")
     kb.button("💰 سپرده‌گذاری", callback_data=f"owner_{uid}_bank_deposit")
     kb.button("💸 برداشت", callback_data=f"owner_{uid}_bank_withdraw")
-    kb.button("📤 انتقال بانکی", callback_data=f"owner_{uid}_bank_transfer")
+    kb.button("📤 انتقال", callback_data=f"owner_{uid}_bank_transfer")
     if not has_loan:
-        kb.button("🏦 درخواست وام", callback_data=f"owner_{uid}_bank_loan")
+        kb.button("🏦 وام", callback_data=f"owner_{uid}_bank_loan")
     else:
         kb.button("💳 پرداخت وام", callback_data=f"owner_{uid}_bank_pay_loan")
     kb.button("📜 تاریخچه", callback_data=f"owner_{uid}_bank_history")
@@ -3459,11 +3740,11 @@ async def show_bank_account(callback, user, uid):
     user = ensure_account_number(uid, user)
     bank = user.get("bank", create_default_bank())
     acc = bank.get("account_number") or "—"
-    text = (f"📋 **حساب بانکی شما**\n\n"
-            f"🆔 شماره حساب: `{acc}`\n"
-            f"💰 موجودی سپرده: **{format_coins(bank.get('balance', 0))}**\n"
-            f"💼 موجودی کیف پول: {format_coins(user['coins'])}\n\n"
-            f"💡 این شماره رو به دیگران بده تا بتونن بهت انتقال بانکی بزنن.")
+    text = (f"📋 **حساب بانکی**\n\n"
+            f"🆔 `{acc}`\n"
+            f"💰 سپرده: **{format_coins(bank.get('balance', 0))}**\n"
+            f"💼 کیف: {format_coins(user['coins'])}\n\n"
+            f"💡 این شماره رو به دیگران بده.")
     kb = InlineKeyboardBuilder()
     kb.button("🔙 بازگشت", callback_data=f"owner_{uid}_bank_menu")
     kb.adjust(1)
@@ -3473,27 +3754,27 @@ async def show_bank_account(callback, user, uid):
 async def show_bank_loan(callback, user, uid, state):
     bank = user.get("bank", create_default_bank())
     if bank.get("loan"):
-        await safe_edit(callback, "❌ شما وام فعال دارید.", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, "❌ وام فعال داری.", reply_markup=get_keyboard(uid)); return
     banned_until = bank.get("loan_banned_until")
     if banned_until:
         try:
             bu = datetime.fromisoformat(banned_until)
             if datetime.now() < bu:
                 rem = (bu - datetime.now()).total_seconds()
-                await safe_edit(callback, f"❌ تا {format_time_remaining(rem)} دیگه نمی‌تونی وام بگیری.", reply_markup=get_keyboard(uid)); return
+                await safe_edit(callback, f"❌ تا {format_time_remaining(rem)} نمی‌تونی وام بگیری.", reply_markup=get_keyboard(uid)); return
         except Exception:
             pass
     avg = get_avg_balance_24h(user)
     max_loan = int(avg * LOAN_MULTIPLIER)
     period_end = get_period_end_datetime(user.get("current_period", 1))
     text = (f"🏦 **درخواست وام**\n\n"
-            f"💰 میانگین حساب ۲۴ ساعت اخیر: {format_coins(avg)}\n"
-            f"📊 حداکثر وام: **{format_coins(max_loan)}**\n\n"
+            f"💰 میانگین حساب: {format_coins(avg)}\n"
+            f"📊 حداکثر: **{format_coins(max_loan)}**\n\n"
             f"📈 سود: ۴۰٪ هر ۳۰ دقیقه\n\n")
     if period_end:
         rem_period = (period_end - datetime.now()).total_seconds()
-        text += f"⏰ پایان دوره: {format_league_time(rem_period)} دیگه\n\n"
-    text += "💰 مقدار وامی که می‌خوای بگیری رو وارد کن:"
+        text += f"⏰ پایان دوره: {format_league_time(rem_period)}\n\n"
+    text += "💰 مقدار وام:"
     await state.set_state(UserForm.bank_loan_amount)
     await safe_edit(callback, text, reply_markup=get_keyboard(uid))
 
@@ -3502,7 +3783,7 @@ async def show_pay_loan(callback, user, uid, state):
     bank = user.get("bank", create_default_bank())
     loan = bank.get("loan")
     if not loan:
-        await safe_edit(callback, "❌ وام فعالی نداری.", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, "❌ وام نداری.", reply_markup=get_keyboard(uid)); return
     total_due = loan.get("total_due", 0)
     try:
         due = datetime.fromisoformat(loan["due_time"])
@@ -3510,10 +3791,9 @@ async def show_pay_loan(callback, user, uid, state):
     except Exception:
         rem = 0
     text = (f"💳 **فیش پرداخت وام**\n\n"
-            f"💰 مبلغ بازپرداخت: **{format_coins(total_due)}**\n"
-            f"⏰ زمان باقی‌مونده: {format_time_remaining(rem)}\n\n"
-            f"⚠️ اگه به موقع پرداخت نکنی، جریمه سنگین می‌شی!\n\n"
-            f"آیا می‌خوای پرداخت کنی؟")
+            f"💰 **{format_coins(total_due)}**\n"
+            f"⏰ {format_time_remaining(rem)}\n\n"
+            f"⚠️ اگه پرداخت نکنی، جریمه سنگین!\n\nمطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ پرداخت", callback_data=f"owner_{uid}_pay_loan_yes")
     kb.button("❌ لغو", callback_data=f"owner_{uid}_back")
@@ -3525,9 +3805,9 @@ async def show_bank_history(callback, user, uid):
     bank = user.get("bank", create_default_bank())
     history = bank.get("history", [])
     if not history:
-        text = "📜 تاریخچه‌ای موجود نیست."
+        text = "📜 تاریخچه‌ای نیست."
     else:
-        text = "📜 **تاریخچه‌ی تراکنش‌ها**\n\n"
+        text = "📜 **تاریخچه**\n\n"
         type_fa = {"deposit": "💰 سپرده", "withdraw": "💸 برداشت",
                    "transfer_in": "📥 دریافتی", "transfer_out": "📤 انتقال",
                    "interest": "📈 سود", "loan": "🏦 وام"}
@@ -3540,15 +3820,11 @@ async def show_bank_history(callback, user, uid):
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
 
-# ==================== MARKET SHOW ====================
 async def show_market_menu(callback, user, uid):
     update_market_prices()
     market = get_market_data()
     prefix = f"owner_{uid}_"
-    state = market.get("state", "normal")
-    state_fa = get_market_state_fa(state)
     text = "💹 **بازار کشاورزی**\n\n"
-    text += f"📊 وضعیت بازار: **{state_fa}**\n\n"
     for cid, cur in MARKET_CURRENCIES.items():
         cdata = market["currencies"][cid]
         price = cdata["price"]
@@ -3559,15 +3835,15 @@ async def show_market_menu(callback, user, uid):
             arrow = "📉"
         else:
             arrow = "➡️"
-        text += f"{cur['emoji']} **{cur['name']}**: {format_market_price(price)} سکه  {arrow} {last_ch:+.2f}%\n"
-    text += "\n💡 روی هر ارز بزن تا بخری، یا «دارایی بازار» رو بزن تا بفروشی."
+        text += f"{cur['emoji']} **{cur['name']}**: {format_market_price(price)}  {arrow} {last_ch:+.2f}%\n"
+    text += "\n💡 روی هر ارز بزن تا بخری."
     kb = InlineKeyboardBuilder()
     kb.button(f"{MARKET_CURRENCIES['millet']['emoji']} ارزن", callback_data=f"{prefix}market_cid_millet")
     kb.button(f"{MARKET_CURRENCIES['alfalfa']['emoji']} یونجه", callback_data=f"{prefix}market_cid_alfalfa")
     kb.button(f"{MARKET_CURRENCIES['wheat']['emoji']} گندم", callback_data=f"{prefix}market_cid_wheat")
     kb.button(f"{MARKET_CURRENCIES['barley']['emoji']} جو", callback_data=f"{prefix}market_cid_barley")
     kb.button(f"{MARKET_CURRENCIES['corn']['emoji']} ذرت", callback_data=f"{prefix}market_cid_corn")
-    kb.button("💼 دارایی بازار", callback_data=f"{prefix}market_asset")
+    kb.button("💼 دارایی", callback_data=f"{prefix}market_asset")
     kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(2, 2, 1, 1, 1)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
@@ -3578,7 +3854,7 @@ async def show_market_asset_menu(callback, user, uid):
     market = get_market_data()
     prefix = f"owner_{uid}_"
     holdings = user.get("market_holdings", {})
-    text = "💼 **دارایی بازار شما**\n\n"
+    text = "💼 **دارایی بازار**\n\n"
     has_any = False
     buttons = []
     for cid, cur in MARKET_CURRENCIES.items():
@@ -3592,17 +3868,12 @@ async def show_market_asset_menu(callback, user, uid):
         current_value = amount * price
         profit = current_value - invested
         profit_pct = (profit / invested * 100) if invested > 0 else 0
-        if profit > 0.01:
-            emoji = "📈"
-        elif profit < -0.01:
-            emoji = "📉"
-        else:
-            emoji = "➡️"
+        emoji = "📈" if profit > 0.01 else ("📉" if profit < -0.01 else "➡️")
         text += (f"{cur['emoji']} **{cur['name']}**\n"
-                 f"   📦 مقدار: {amount:.4f}\n"
-                 f"   💰 ارزش فعلی: {format_coins(int(current_value))}\n"
+                 f"   📦 {amount:.4f}\n"
+                 f"   💰 ارزش: {format_coins(int(current_value))}\n"
                  f"   💵 سرمایه: {format_coins(int(invested))}\n"
-                 f"   {emoji} سود/ضرر: {format_coins(int(profit))} ({profit_pct:+.2f}%)\n\n")
+                 f"   {emoji} سود: {format_coins(int(profit))} ({profit_pct:+.2f}%)\n\n")
         buttons.append((cid, cur))
     if not has_any:
         text += "هنوز چیزی نخریدی!"
@@ -3614,12 +3885,11 @@ async def show_market_asset_menu(callback, user, uid):
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
 
-# ==================== LANDS / INVENTORY ====================
 async def show_lands_menu(callback, user, uid):
     plots = user.get("plots", [])
     mp = user.get("max_plots", 1)
     prefix = f"owner_{uid}_"
-    text = f"🏞️ **زمین‌های شما ({mp})**\n\n"
+    text = f"🏞️ **زمین‌ها ({mp})**\n\n"
     kb = InlineKeyboardBuilder()
     for i, p in enumerate(plots):
         fr = FRUITS[p.get("fruit", 0)]
@@ -3630,14 +3900,14 @@ async def show_lands_menu(callback, user, uid):
             kb.button(f"🏞{i+1} ⏳", callback_data="noop")
         elif p["state"] == "harvested":
             text += f"🏞 {i+1}: 📦 {fr}\n"
-            kb.button(f"🏞{i+1} 📦 {fr}", callback_data=f"{prefix}harvest_{i}")
+            kb.button(f"🏞{i+1} 📦", callback_data=f"{prefix}harvest_{i}")
         else:
             text += f"🏞 {i+1}: خالی\n"
             kb.button(f"🏞{i+1} 🌱", callback_data=f"{prefix}buy_{i}")
     np = get_land_price(mp)
     if np:
         text += f"\n🛒 زمین {mp+1}: {format_coins(np)}"
-        kb.button(f"🛒 خرید زمین ({format_coins(np)})", callback_data=f"{prefix}buy_land")
+        kb.button(f"🛒 خرید زمین", callback_data=f"{prefix}buy_land")
     kb.button("📦 انبار", callback_data=f"{prefix}inventory_menu")
     kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(2)
@@ -3656,7 +3926,9 @@ async def show_inventory(callback, user, uid):
     else:
         for fn, cnt in inv.items():
             if fn.startswith("طلایی_"):
-                text += f"✨ {fn.replace('طلایی_','')} (طلایی): {cnt}\n"
+                base_name = fn.replace("طلایی_", "")
+                text += f"✨ {base_name} (طلایی): {cnt}\n"
+                kb.button(f"💰 فروش {base_name} ✨", callback_data=f"{prefix}sell_inv_{fn}")
             else:
                 text += f"🍎 {fn}: {cnt}\n"
                 kb.button(f"💰 فروش {fn}", callback_data=f"{prefix}sell_inv_{fn}")
@@ -3676,12 +3948,11 @@ async def buy_seed_for_plot(callback, user, uid, idx, state):
         await safe_edit(callback, "📦 اول برداشت.", reply_markup=get_keyboard(uid)); return
     avail = get_available_fruits(user)
     eff, _ = get_season_effects()
-    m = user["prestige_multiplier"]
     prefix = f"owner_{uid}_"
     text = f"🌱 **کاشت زمین {idx+1}**\n\n"
     kb = InlineKeyboardBuilder()
     for i in avail:
-        bp = int(PRICES[i][0] * m * eff["buy_mult"])
+        bp = get_seed_price(i, user, eff)
         text += f"• {FRUITS[i]}: {format_coins(bp)}\n"
         kb.button(f"🌱 {FRUITS[i]}", callback_data=f"{prefix}plant_plot_{idx}_{i}")
     kb.button("🔙 بازگشت", callback_data=f"{prefix}lands_menu")
@@ -3694,14 +3965,13 @@ async def plant_in_plot(callback, user, uid, pidx, fidx, state):
     if pidx >= len(plots) or fidx not in get_available_fruits(user):
         return
     eff, _ = get_season_effects()
-    bp = int(PRICES[fidx][0] * user["prestige_multiplier"] * eff["buy_mult"])
+    bp = get_seed_price(fidx, user, eff)
     if user["coins"] < bp:
         await safe_edit(callback, f"❌ نیاز: {format_coins(bp)}", reply_markup=get_keyboard(uid)); return
     await state.update_data(tr_type="plant", tr_plot_idx=pidx, tr_fruit_idx=fidx)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🌱 **تأیید کاشت**\n\n"
-            f"🍎 {FRUITS[fidx]}\n🏞️ زمین {pidx+1}\n"
-            f"💰 هزینه: **{format_coins(bp)}**\n\n⚠️ مطمئنی؟")
+    text = (f"🌱 **کاشت {FRUITS[fidx]}**\n\n🏞️ زمین {pidx+1}\n"
+            f"💰 **{format_coins(bp)}**\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -3728,8 +3998,10 @@ async def sell_from_inventory(callback, user, uid, fn):
     inv = user.get("inventory", {})
     if inv.get(fn, 0) < 1:
         await safe_edit(callback, "❌", reply_markup=get_keyboard(uid)); return
+    is_golden = fn.startswith("طلایی_")
+    real_name = fn.replace("طلایی_", "") if is_golden else fn
     try:
-        cf = FRUITS.index(fn)
+        cf = FRUITS.index(real_name)
     except Exception:
         await safe_edit(callback, "❌", reply_markup=get_keyboard(uid)); return
     inv[fn] -= 1
@@ -3737,6 +4009,8 @@ async def sell_from_inventory(callback, user, uid, fn):
         del inv[fn]
     eff, _ = get_season_effects()
     bs = int(PRICES[cf][1] * user["prestige_multiplier"] * eff["sell_mult"])
+    if is_golden:
+        bs *= GOLDEN_MULT
     sp = bs
     pb = get_pet_effect(user, "sell")
     if pb > 0:
@@ -3745,11 +4019,15 @@ async def sell_from_inventory(callback, user, uid, fn):
     if cb > 0:
         sp += int(bs * cb / 100)
     if user["upgrades"].get("golden_pot", 0) > 0:
-        sp = int(sp * (1 + 0.1 * user["upgrades"]["golden_pot"]))
-    g = random.random() < eff["golden_chance"]
-    if g:
-        sp *= 2
-    xp = int(xp_from_sale(fn) * user["prestige_multiplier"] * eff["xp_mult"])
+        sp = int(sp * get_sell_bonus(user))
+    g = False
+    if not is_golden:
+        g = random.random() < eff["golden_chance"]
+        if g:
+            sp *= 2
+    xp = int(xp_from_sale(real_name) * user["prestige_multiplier"] * eff["xp_mult"])
+    if is_golden:
+        xp *= GOLDEN_MULT
     px = get_pet_effect(user, "xp")
     if px > 0:
         xp += int(xp * px / 100)
@@ -3767,8 +4045,15 @@ async def sell_from_inventory(callback, user, uid, fn):
     update_leaderboard(uid, user["name"], nc, nl, user["prestige"])
     upd = get_user(uid)
     update_league_profit(uid, upd, upd["coins"] - upd.get("period_start_coins", 1))
-    gt = " ✨" if g else ""
-    await safe_edit(callback, f"✅ {fn}{gt}\n💰 +{format_coins(sp)}\n⭐ +{xp}\n📈 {nl}{lu}", reply_markup=get_keyboard(uid))
+    if is_golden:
+        await safe_edit(callback,
+            f"✨ **{real_name} طلایی فروخته شد!**\n💰 +{format_coins(sp)}\n⭐ +{xp}\n📈 {nl}{lu}",
+            reply_markup=get_keyboard(uid))
+    else:
+        gt = " ✨" if g else ""
+        await safe_edit(callback,
+            f"✅ {fn}{gt}\n💰 +{format_coins(sp)}\n⭐ +{xp}\n📈 {nl}{lu}",
+            reply_markup=get_keyboard(uid))
 
 
 async def switch_fruit(callback, user, uid, idx):
@@ -3783,8 +4068,8 @@ async def show_leaderboard(callback, user, uid):
     lb = data["leaderboard"][:10]
     text = "🏆 **لیدربرد:**\n\n"
     for i, it in enumerate(lb, 1):
-        p = f"⭐{it['prestige']}" if it['prestige'] > 0 else ""
-        text += f"{i}. {it['name']} {p} — لول {it['level']} | {format_coins(it['coins'])}\n"
+        p = f"⭐{it.get('prestige',0)}" if it.get('prestige', 0) > 0 else ""
+        text += f"{i}. {it.get('name','?')} {p} — لول {it.get('level',1)} | {format_coins(it.get('coins',0))}\n"
     if not lb:
         text += "خالیه!"
     await safe_edit(callback, text, reply_markup=get_keyboard(uid))
@@ -3792,47 +4077,52 @@ async def show_leaderboard(callback, user, uid):
 
 async def show_upgrades(callback, user, uid):
     u = user["upgrades"]
-    c1 = 1000 * (u.get("auto_water", 0) + 1)
-    c2 = 2000 * (u.get("golden_pot", 0) + 1)
-    c3 = 5000 * (u.get("professional_seeder", 0) + 1)
+    w = u.get("auto_water", 0)
+    g = u.get("golden_pot", 0)
+    s = u.get("professional_seeder", 0)
+    c1 = upgrade_price("auto_water", w)
+    c2 = upgrade_price("golden_pot", g)
+    c3 = upgrade_price("professional_seeder", s)
     mp = user.get("max_plots", 1)
     lp = get_land_price(mp)
     prefix = f"owner_{uid}_"
     text = (f"🔧 **ارتقاء ابزار**\n\n"
-            f"💧 **آبیاری خودکار** (۲۰٪ رشد سریع‌تر): **{format_coins(c1)}**\n"
-            f"   خریداری شده: {u.get('auto_water',0)} بار\n\n"
-            f"🏺 **گلدان طلایی** (۱۰٪ فروش بیشتر): **{format_coins(c2)}**\n"
-            f"   خریداری شده: {u.get('golden_pot',0)} بار\n\n"
-            f"🌱 **بذرپاش حرفه‌ای**: **{format_coins(c3)}**\n"
-            f"   خریداری شده: {u.get('professional_seeder',0)} بار\n")
+            f"💧 **آبیاری خودکار** — هر سطح ۲۰٪ رشد سریع‌تر\n"
+            f"   سطح: {w} | ضریب: {get_growth_mult(user):.3f}x\n"
+            f"   💰 {format_coins(c1)}\n\n"
+            f"🏺 **گلدان طلایی** — هر سطح ۱۰٪ فروش بیشتر\n"
+            f"   سطح: {g} | ضریب: {get_sell_bonus(user):.2f}x\n"
+            f"   💰 {format_coins(c2)}\n\n"
+            f"🌱 **بذرپاش** — هر سطح ۱۰٪ تخفیف (سقف ۵۰٪)\n"
+            f"   سطح: {s}\n"
+            f"   💰 {format_coins(c3)}\n")
     if lp:
-        text += f"\n🏞️ **خرید زمین {mp+1}:** **{format_coins(lp)}**"
+        text += f"\n🏞️ **زمین {mp+1}:** **{format_coins(lp)}**"
     kb = InlineKeyboardBuilder()
-    kb.button(f"💧 آبیاری ({format_coins(c1)})", callback_data=f"{prefix}upgrade_auto_water")
-    kb.button(f"🏺 گلدان ({format_coins(c2)})", callback_data=f"{prefix}upgrade_golden_pot")
-    kb.button(f"🌱 بذرپاش ({format_coins(c3)})", callback_data=f"{prefix}upgrade_professional_seeder")
+    kb.button(f"💧 آبیاری", callback_data=f"{prefix}upgrade_auto_water")
+    kb.button(f"🏺 گلدان", callback_data=f"{prefix}upgrade_golden_pot")
+    kb.button(f"🌱 بذرپاش", callback_data=f"{prefix}upgrade_professional_seeder")
     if lp:
-        kb.button(f"🏞️ خرید زمین ({format_coins(lp)})", callback_data=f"{prefix}buy_land")
+        kb.button(f"🏞️ خرید زمین", callback_data=f"{prefix}buy_land")
     kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(1)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
 
 async def buy_upgrade(callback, user, uid, key, state):
-    base = {"auto_water": 1000, "golden_pot": 2000, "professional_seeder": 5000}
-    if key not in base:
+    if key not in ["auto_water", "golden_pot", "professional_seeder"]:
         return
     cnt = user["upgrades"].get(key, 0)
-    cost = base[key] * (cnt + 1)
+    cost = upgrade_price(key, cnt)
     if user["coins"] < cost:
-        await safe_edit(callback, f"❌ سکه کافی نیست! نیاز: {format_coins(cost)}", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, f"❌ نیاز: {format_coins(cost)}", reply_markup=get_keyboard(uid)); return
     names = {"auto_water": "آبیاری خودکار", "golden_pot": "گلدان طلایی", "professional_seeder": "بذرپاش"}
     await state.update_data(tr_type="upgrade", tr_key=key, tr_count=cnt, tr_cost=cost)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🔧 **تأیید ارتقاء {names[key]}**\n\n"
-            f"💰 هزینه: **{format_coins(cost)}**\n"
-            f"📈 از {cnt} به {cnt+1}\n"
-            f"💼 بعد از خرید: {format_coins(user['coins'] - cost)}\n\n⚠️ مطمئنی؟")
+    text = (f"🔧 **تأیید {names[key]}**\n\n"
+            f"💰 **{format_coins(cost)}**\n"
+            f"📈 از {cnt} → {cnt+1}\n"
+            f"💼 بعد: {format_coins(user['coins'] - cost)}\n\n⚠️ مطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -3840,48 +4130,68 @@ async def buy_upgrade(callback, user, uid, key, state):
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
 
+def _generate_missions(user):
+    available = get_available_fruits(user)
+    mission_fruits = [i for i in available if i < 6]
+    if not mission_fruits:
+        mission_fruits = [0]
+    num_missions = min(3, len(mission_fruits))
+    chosen = random.sample(mission_fruits, num_missions)
+    orders = []
+    for fi in chosen:
+        orders.append({"fruit": FRUITS[fi], "count": random.randint(1, 3)})
+    return {"orders": orders, "completed": False, "completed_at": None, "next_at": None}
+
+
 async def show_daily_orders(callback, user, uid):
-    current_hour = datetime.now().strftime("%Y-%m-%d-%H")
-    if user["daily_orders"]["date"] != current_hour:
-        available = get_available_fruits(user)
-        mission_fruits = [i for i in available if i < 6]
-        if not mission_fruits:
-            mission_fruits = [0]
-        num_missions = min(3, len(mission_fruits))
-        chosen_fruits = random.sample(mission_fruits, num_missions)
-        orders = []
-        for fi in chosen_fruits:
-            orders.append({"fruit": FRUITS[fi], "count": random.randint(1, 3)})
-        update_user(uid, {"daily_orders": {"date": current_hour, "orders": orders, "completed": False}})
+    do = user.get("daily_orders", {})
+    now = datetime.now()
+    if do.get("completed"):
+        next_at_str = do.get("next_at")
+        next_at = None
+        if next_at_str:
+            try:
+                next_at = datetime.fromisoformat(next_at_str)
+            except Exception:
+                next_at = None
+        if next_at and now < next_at:
+            rem = (next_at - now).total_seconds()
+            await safe_edit(callback,
+                f"📦 **ماموریت‌ها تکمیل شده!**\n\n⏰ ماموریت جدید: **{format_time_remaining(rem)}**",
+                reply_markup=get_keyboard(uid))
+            return
+        do = _generate_missions(user)
+        update_user(uid, {"daily_orders": do})
         user = get_user(uid)
-    orders = user["daily_orders"]["orders"]
-    if user["daily_orders"]["completed"]:
-        next_hour = (datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
-        rem = (next_hour - datetime.now()).total_seconds()
-        await safe_edit(callback, f"📦 امروز تکمیل شده!\n⏰ ماموریت جدید تا {format_time_remaining(rem)} دیگه.",
-            reply_markup=get_keyboard(uid)); return
+        do = user["daily_orders"]
+    if not do.get("orders"):
+        do = _generate_missions(user)
+        update_user(uid, {"daily_orders": do})
+        user = get_user(uid)
+        do = user["daily_orders"]
+    orders = do["orders"]
     inv = user.get("inventory", {})
     prefix = f"owner_{uid}_"
-    text = "📦 **ماموریت‌های ساعتی**\n\n💡 **با انجام ماموریت ×۱.۵ بیشتر سود کن!**\n\n"
+    text = "📦 **ماموریت‌های ساعتی**\n\n💡 **×۱.۵ سود بیشتر!**\n\n"
     for i, o in enumerate(orders, 1):
         h = inv.get(o["fruit"], 0)
         text += f"{i}. {o['count']}× {o['fruit']} ({'✅' if h >= o['count'] else '❌'} داری: {h})\n"
     bonus = int(sum(PRICES[FRUITS.index(o["fruit"])][1] * o["count"] * 1.5 for o in orders) * user["prestige_multiplier"])
-    text += f"\n💰 پاداش تقریبی: **{format_coins(bonus)}**"
-    next_hour = (datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
-    rem = (next_hour - datetime.now()).total_seconds()
-    text += f"\n⏰ ماموریت جدید: {format_time_remaining(rem)} دیگه"
+    text += f"\n💰 پاداش: **{format_coins(bonus)}**"
     kb = InlineKeyboardBuilder()
-    kb.button("✅ تکمیل ماموریت‌ها", callback_data=f"{prefix}complete_orders")
+    kb.button("✅ تکمیل", callback_data=f"{prefix}complete_orders")
     kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
     kb.adjust(1)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
 
 async def complete_orders(callback, user, uid):
-    if user["daily_orders"]["completed"]:
-        await safe_edit(callback, "قبلاً تکمیل شده!", reply_markup=get_keyboard(uid)); return
-    orders = user["daily_orders"]["orders"]
+    do = user.get("daily_orders", {})
+    if do.get("completed"):
+        await safe_edit(callback, "قبلاً تکمیل!", reply_markup=get_keyboard(uid)); return
+    orders = do.get("orders", [])
+    if not orders:
+        await safe_edit(callback, "❌ ماموریتی نیست.", reply_markup=get_keyboard(uid)); return
     inv = user.get("inventory", {})
     for o in orders:
         if inv.get(o["fruit"], 0) < o["count"]:
@@ -3892,32 +4202,40 @@ async def complete_orders(callback, user, uid):
             del inv[o["fruit"]]
     bonus = int(sum(PRICES[FRUITS.index(o["fruit"])][1] * o["count"] * 1.5 for o in orders) * user["prestige_multiplier"])
     nc = user["coins"] + bonus
-    current_hour = datetime.now().strftime("%Y-%m-%d-%H")
+    now = datetime.now()
+    next_at = (now + timedelta(hours=1)).isoformat()
     update_user(uid, {"coins": nc, "inventory": inv,
-                       "daily_orders": {"date": current_hour, "orders": orders, "completed": True}})
+                       "daily_orders": {"orders": orders, "completed": True,
+                                        "completed_at": now.isoformat(), "next_at": next_at}})
     update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
-    await safe_edit(callback, f"✅ ماموریت‌ها تکمیل شد!\n💰 +{format_coins(bonus)}", reply_markup=get_keyboard(uid))
+    await safe_edit(callback,
+        f"✅ **تکمیل!**\n💰 +{format_coins(bonus)}\n\n⏰ ماموریت جدید: **۱ ساعت دیگه**",
+        reply_markup=get_keyboard(uid))
 
 
 async def show_shop(callback, user, uid):
-    lv = user["level"]
+    lv = user["level"] if user.get("prestige", 0) == 0 else 7
     if lv < 4 and user.get("prestige", 0) == 0:
         await safe_edit(callback, "🔒 لول ۴", reply_markup=get_keyboard(uid)); return
     pr = SHOP_PRICES.get(lv, SHOP_PRICES[7])
+    mult = user.get("prestige_multiplier", 1.0)
     prefix = f"owner_{uid}_"
-    text = "🛒 **فروشگاه سکه**\n\n💰 با توجه به لول شما، مقدار سکه‌ها متفاوت است.\n\n"
+    text = "🛒 **فروشگاه سکه**\n\n"
+    if mult > 1.0:
+        text += f"⭐ ضریب پرستیژ: **{mult:.2f}x**\n\n"
     for amt, c in pr.items():
-        text += f"• **{amt:,} تومان** → {format_coins(c)}"
+        final_coins = int(c * mult)
+        text += f"• **{amt:,} تومان** → {format_coins(final_coins)}"
         if amt == 50000:
-            text += " + 🎁 بذر"
+            text += " + 🎁"
         elif amt == 70000:
-            text += " + 🦅 ققنوس"
+            text += " + 🦅"
         elif amt == 100000:
-            text += " + ✨ بذر طلایی"
+            text += " + ✨"
         text += "\n"
     kb = InlineKeyboardBuilder()
     for amt in pr:
-        lbl = f"{amt:,} تومان"
+        lbl = f"{amt:,}"
         if amt == 70000:
             lbl += " 🦅"
         elif amt == 100000:
@@ -3925,7 +4243,7 @@ async def show_shop(callback, user, uid):
         if amt == 70000 and user.get("phoenix_owned"):
             continue
         kb.button(lbl, callback_data=f"{prefix}shop_{amt}")
-    kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
+    kb.button("🔙", callback_data=f"{prefix}back")
     kb.adjust(2)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
@@ -3935,21 +4253,24 @@ async def buy_shop(callback, user, uid, amount, state):
     pr = SHOP_PRICES.get(lv, SHOP_PRICES[7])
     if amount not in pr:
         return
-    coins = pr[amount]
+    mult = user.get("prestige_multiplier", 1.0)
+    coins = int(pr[amount] * mult)
     await state.update_data(tr_type="buy_shop", tr_amount=amount, tr_coins=coins)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"💳 **تأیید خرید سکه**\n\n"
-            f"💰 مبلغ: **{amount:,} تومان**\n"
-            f"🪙 سکه: **{format_coins(coins)}**\n")
+    text = (f"💳 **خرید سکه**\n\n"
+            f"💰 **{amount:,} تومان**\n"
+            f"🪙 **{format_coins(coins)}**\n")
+    if mult > 1.0:
+        text += f"⭐ ضریب: {mult:.2f}x\n"
     if amount == 50000:
-        text += "🎁 + ۱ بذر معمولی\n"
+        text += "🎁 + بذر\n"
     elif amount == 70000:
-        text += "🦅 + ۱ ققنوس\n"
+        text += "🦅 + ققنوس\n"
     elif amount == 100000:
-        text += "✨ + ۱ بذر طلایی\n"
-    text += "\n⚠️ پرداخت از کیف پول بله."
+        text += "✨ + طلایی\n"
+    text += "\n⚠️ پرداخت از کیف بله."
     kb = InlineKeyboardBuilder()
-    kb.button("✅ تأیید و پرداخت", callback_data="confirm_yes")
+    kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
     kb.adjust(2)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
@@ -3966,38 +4287,38 @@ async def show_worker(callback, user, uid):
             exp = datetime.fromisoformat(pw["expires_at"])
             rem = (exp - datetime.now()).total_seconds()
             fname = FRUITS[pw["fruit"]] if pw.get("fruit") is not None else "?"
-            st = "⏸ متوقف" if pw.get("paused") else "✅ فعال"
-            text += f"🌱 **کارگر کاشت:** {st} ({fname})\n   ⏰ {format_time_remaining(rem)}\n\n"
+            st = "⏸" if pw.get("paused") else "✅"
+            text += f"🌱 **کاشت:** {st} ({fname})\n   ⏰ {format_time_remaining(rem)}\n\n"
         except Exception:
-            text += f"🌱 **کارگر کاشت:** ✅ فعال\n\n"
+            text += f"🌱 **کاشت:** ✅\n\n"
     else:
-        text += f"🌱 **کارگر کاشت:** ❌ غیرفعال\n\n"
+        text += f"🌱 **کاشت:** ❌\n\n"
     if hw.get("active"):
         try:
             exp = datetime.fromisoformat(hw["expires_at"])
             rem = (exp - datetime.now()).total_seconds()
-            st = "⏸ متوقف" if hw.get("paused") else "✅ فعال"
-            text += f"💼 **کارگر برداشت/فروش:** {st}\n   ⏰ {format_time_remaining(rem)}\n\n"
+            st = "⏸" if hw.get("paused") else "✅"
+            text += f"💼 **برداشت/فروش:** {st}\n   ⏰ {format_time_remaining(rem)}\n\n"
         except Exception:
-            text += f"💼 **کارگر برداشت/فروش:** ✅ فعال\n\n"
+            text += f"💼 **برداشت/فروش:** ✅\n\n"
     else:
-        text += f"💼 **کارگر برداشت/فروش:** ❌ غیرفعال\n\n"
-    text += ("💡 **کارگر کاشت:** فقط سیب به بالا. قیمت = ۱/۳ قیمت فروش × ساعت.\n"
-             "💡 **کارگر برداشت و فروش:** رایگان، ۲۰٪ کمیسیون.")
+        text += f"💼 **برداشت/فروش:** ❌\n\n"
+    text += ("💡 **کاشت:** قیمت = ۱/۳ قیمت فروش × ساعت.\n"
+             "💡 **برداشت/فروش:** رایگان، ۲۰٪ کمیسیون.")
     kb = InlineKeyboardBuilder()
     if not pw.get("active"):
-        kb.button("🌱 اجاره‌ی کارگر کاشت", callback_data=f"{prefix}hire_planting")
+        kb.button("🌱 اجاره کارگر کاشت", callback_data=f"{prefix}hire_planting")
     else:
-        lbl = "▶️ ادامه‌ی کارگر کاشت" if pw.get("paused") else "⏸ توقف موقت کارگر کاشت"
+        lbl = "▶️ ادامه کاشت" if pw.get("paused") else "⏸ توقف کاشت"
         kb.button(lbl, callback_data=f"{prefix}worker_toggle_planting")
-        kb.button("🚪 اخراج کارگر کاشت", callback_data=f"{prefix}fire_planting")
+        kb.button("🚪 اخراج کاشت", callback_data=f"{prefix}fire_planting")
     if not hw.get("active"):
-        kb.button("💼 اجاره‌ی کارگر برداشت و فروش", callback_data=f"{prefix}hire_harvest")
+        kb.button("💼 اجاره کارگر برداشت/فروش", callback_data=f"{prefix}hire_harvest")
     else:
-        lbl = "▶️ ادامه‌ی کارگر برداشت/فروش" if hw.get("paused") else "⏸ توقف موقت کارگر برداشت/فروش"
+        lbl = "▶️ ادامه برداشت" if hw.get("paused") else "⏸ توقف برداشت"
         kb.button(lbl, callback_data=f"{prefix}worker_toggle_harvest")
-        kb.button("🚪 اخراج کارگر برداشت/فروش", callback_data=f"{prefix}fire_harvest")
-    kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
+        kb.button("🚪 اخراج برداشت", callback_data=f"{prefix}fire_harvest")
+    kb.button("🔙", callback_data=f"{prefix}back")
     kb.adjust(1)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
@@ -4006,30 +4327,29 @@ async def start_hire_planting(callback, user, uid):
     available_planting = [i for i in get_available_fruits(user) if i >= 2]
     prefix = f"owner_{uid}_"
     if not available_planting:
-        await safe_edit(callback, "❌ برای کارگر کاشت، حداقل به لول ۳ برس (سیب).", reply_markup=get_keyboard(uid)); return
+        await safe_edit(callback, "❌ حداقل لول ۳.", reply_markup=get_keyboard(uid)); return
     eff, _ = get_season_effects()
-    m = user["prestige_multiplier"]
-    text = "🌱 **اجاره‌ی کارگر کاشت**\n\n🍎 میوه انتخاب کن:\n\n"
+    text = "🌱 **کارگر کاشت**\n\n🍎 میوه:\n\n"
     kb = InlineKeyboardBuilder()
     for i in available_planting:
-        sp = int(PRICES[i][1] * m * eff["sell_mult"])
+        sp = int(PRICES[i][1] * user["prestige_multiplier"] * eff["sell_mult"])
         price_per_hour = sp // 3
         text += f"• {FRUITS[i]}: {format_coins(price_per_hour)} / ساعت\n"
         kb.button(f"🌱 {FRUITS[i]}", callback_data=f"{prefix}wp_fruit_{i}")
-    kb.button("🔙 بازگشت", callback_data=f"{prefix}worker_menu")
+    kb.button("🔙", callback_data=f"{prefix}worker_menu")
     kb.adjust(2)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
 
 async def start_hire_harvest(callback, user, uid):
-    text = ("💼 **اجاره‌ی کارگر برداشت و فروش**\n\n"
-            "📌 کارها:\n• میوه‌های رسیده → انبار\n• از انبار می‌فروشه\n\n"
-            "💰 هزینه: **رایگان**\n📊 کمیسیون: **۲۰٪ از هر فروش**\n\n"
-            "⏰ چند ساعت؟ (عدد بفرست، مثلاً `5`)\nحداکثر: ۷۲\n\n❌ برای لغو /cancel بزن.")
+    text = ("💼 **کارگر برداشت و فروش**\n\n"
+            "📌 کارها:\n• برداشت → انبار\n• فروش انبار (۲۰٪ کمیسیون)\n\n"
+            "💰 رایگان\n\n"
+            "⏰ چند ساعت؟ (۱-۷۲)\n❌ /cancel")
     await safe_edit(callback, text, reply_markup=get_keyboard(uid))
 
 
-# ==================== SHOW CLAN ====================
+# ==================== CLAN ====================
 async def show_clan_menu(callback, user, uid):
     prefix = f"owner_{uid}_"
     clan_id = user.get("clan_id")
@@ -4038,14 +4358,13 @@ async def show_clan_menu(callback, user, uid):
         user = get_user(uid)
         clan_id = None
     if not clan_id:
-        text = (f"🏰 **بدون کلن**\n\n"
-                f"💰 ساخت کلن: {format_coins(CLAN_CREATE_COST)}\n\n"
-                f"💡 می‌تونی کلن بسازی یا عضو یه کلن بشی.")
+        text = (f"🏰 **بدون کلن**\n\n💰 ساخت: {format_coins(CLAN_CREATE_COST)}\n\n"
+                f"💡 می‌تونی بسازی یا عضو شی.")
         kb = InlineKeyboardBuilder()
         kb.button("🏰 ساخت کلن", callback_data=f"{prefix}clan_create")
-        kb.button("🔍 جستجوی کلن", callback_data=f"{prefix}clan_search")
-        kb.button("🏆 رتبه‌بندی کلن‌ها", callback_data=f"{prefix}clan_leaderboard")
-        kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
+        kb.button("🔍 جستجو", callback_data=f"{prefix}clan_search")
+        kb.button("🏆 رتبه‌بندی", callback_data=f"{prefix}clan_leaderboard")
+        kb.button("🔙", callback_data=f"{prefix}back")
         kb.adjust(2, 1, 1)
         await safe_edit(callback, text, reply_markup=kb.as_markup())
     else:
@@ -4061,23 +4380,23 @@ async def show_clan_info(callback, user, uid):
         await show_clan_menu(callback, user, uid); return
     il = c["leader_id"] == str(uid)
     text = (f"🏰 **{c['name']}**\n\n"
-            f"📊 لول: {c['level']} | پاداش: +{c['level']*CLAN_BONUS_PER_LEVEL}٪ سود\n"
+            f"📊 لول: {c['level']} | پاداش: +{c['level']*CLAN_BONUS_PER_LEVEL}٪\n"
             f"💰 خزانه: {format_coins(c['treasury'])}\n"
-            f"👥 اعضا: {len(c['members'])}/{CLAN_MAX_MEMBERS.get(c['level'],10)}\n"
-            f"👑 لیدر: {c['leader_name']}\n\n👥 **اعضا:**\n")
+            f"👥 {len(c['members'])}/{CLAN_MAX_MEMBERS.get(c['level'],10)}\n"
+            f"👑 {c['leader_name']}\n\n👥 **اعضا:**\n")
     for m in c["members"][:20]:
         text += f"• {c['member_names'].get(m, '?')}\n"
     kb = InlineKeyboardBuilder()
-    kb.button("👤 دعوت عضو", callback_data=f"{prefix}clan_invite")
-    kb.button("💰 اهدا به خزانه", callback_data=f"{prefix}clan_donate")
-    kb.button("✉️ چت کلن", callback_data=f"{prefix}clan_chat")
+    kb.button("👤 دعوت", callback_data=f"{prefix}clan_invite")
+    kb.button("💰 اهدا", callback_data=f"{prefix}clan_donate")
+    kb.button("✉️ چت", callback_data=f"{prefix}clan_chat")
     if il:
-        kb.button("⬆️ ارتقاء کلن", callback_data=f"{prefix}clan_upgrade")
-        kb.button("🗑 منحل کردن", callback_data=f"{prefix}clan_disband")
+        kb.button("⬆️ ارتقاء", callback_data=f"{prefix}clan_upgrade")
+        kb.button("🗑 منحل", callback_data=f"{prefix}clan_disband")
     else:
-        kb.button("🚪 خروج از کلن", callback_data=f"{prefix}clan_leave")
-    kb.button("🏆 رتبه‌بندی کلن‌ها", callback_data=f"{prefix}clan_leaderboard")
-    kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
+        kb.button("🚪 خروج", callback_data=f"{prefix}clan_leave")
+    kb.button("🏆 رتبه‌بندی", callback_data=f"{prefix}clan_leaderboard")
+    kb.button("🔙", callback_data=f"{prefix}back")
     kb.adjust(2, 2, 2, 1, 1)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
@@ -4086,21 +4405,15 @@ async def show_clan_leaderboard(callback, user, uid):
     prefix = f"owner_{uid}_"
     clans = get_clan_leaderboard()
     if not clans:
-        text = "🏆 **رتبه‌بندی کلن‌ها**\n\nهنوز کلنی نیست!"
+        text = "🏆 **رتبه‌بندی**\n\nهنوز کلنی نیست!"
     else:
         text = "🏆 **رتبه‌بندی کلن‌ها**\n\n"
         for i, (cid, c) in enumerate(clans, 1):
-            medal = ""
-            if i == 1:
-                medal = "🥇 "
-            elif i == 2:
-                medal = "🥈 "
-            elif i == 3:
-                medal = "🥉 "
+            medal = "🥇 " if i == 1 else ("🥈 " if i == 2 else ("🥉 " if i == 3 else ""))
             text += (f"{medal}{i}. **{c['name']}**\n"
-                     f"   📊 لول {c['level']} | 💰 {format_coins(c['treasury'])}\n")
+                     f"   📊 {c['level']} | 💰 {format_coins(c['treasury'])}\n")
     kb = InlineKeyboardBuilder()
-    kb.button("🔙 بازگشت", callback_data=f"{prefix}clan_menu")
+    kb.button("🔙", callback_data=f"{prefix}clan_menu")
     kb.adjust(1)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
@@ -4109,15 +4422,15 @@ async def start_clan_create(callback, user, uid, state):
     if user["coins"] < CLAN_CREATE_COST:
         await safe_edit(callback, f"❌ نیاز: {format_coins(CLAN_CREATE_COST)}", reply_markup=get_keyboard(uid)); return
     await state.set_state(UserForm.clan_name)
-    await safe_edit(callback, "🏰 نام کلن (۳-۲۰ کاراکتر، بدون فاصله):\n\n❌ برای لغو /cancel بزن.", reply_markup=get_keyboard(uid))
+    await safe_edit(callback, "🏰 نام کلن (۳-۲۰ کاراکتر، بدون فاصله):\n❌ /cancel", reply_markup=get_keyboard(uid))
 
 
 async def start_clan_search(callback, user, uid, state):
     await state.set_state(UserForm.clan_search)
-    await safe_edit(callback, "🔍 **جستجوی کلن**\n\nنام کلن رو تایپ کن:\n\n❌ برای لغو /cancel بزن.", reply_markup=get_keyboard(uid))
+    await safe_edit(callback, "🔍 **جستجو**\n\nنام کلن:\n❌ /cancel", reply_markup=get_keyboard(uid))
 
 
-# ==================== SHOW: LEAGUE, PRESTIGE, PET, ACHIEVEMENTS ====================
+# ==================== LEAGUE/PRESTIGE/PET/ACH ====================
 async def show_league_menu(callback, user, uid):
     pn = user.get("current_period", 1)
     lg = LEAGUE_FA.get(user.get("prestige", 0), "?")
@@ -4128,18 +4441,15 @@ async def show_league_menu(callback, user, uid):
     time_text = "?"
     if period_end:
         rem = (period_end - datetime.now()).total_seconds()
-        if rem > 0:
-            time_text = format_league_time(rem)
-        else:
-            time_text = "به‌زودی..."
+        time_text = format_league_time(rem) if rem > 0 else "به‌زودی..."
     text = (f"🏅 **لیگ {lg}** — دوره {pn}\n\n"
-            f"💵 سود شما: {format_coins(profit)}\n"
-            f"📊 رتبه شما: {rank}\n\n"
-            f"⏰ **دوره {pn}، {time_text} دیگر به اتمام می‌رسد و جوایز اهدا خواهد شد.**\n\n"
+            f"💵 سود: {format_coins(profit)}\n"
+            f"📊 رتبه: {rank}\n\n"
+            f"⏰ **دوره {pn}: {time_text} دیگر به اتمام می‌رسد.**\n\n"
             f"🏆 ۱۰٪ برتر افتخار می‌گیرن!")
     kb = InlineKeyboardBuilder()
     kb.button("🎖️ افتخارات", callback_data=f"{prefix}achievements")
-    kb.button("🔙 بازگشت", callback_data=f"{prefix}back")
+    kb.button("🔙", callback_data=f"{prefix}back")
     kb.adjust(1)
     await safe_edit(callback, text, reply_markup=kb.as_markup())
 
@@ -4169,14 +4479,10 @@ async def buy_prestige(callback, user, uid, state):
         await safe_edit(callback, f"❌ نیاز: {format_coins(p)}", reply_markup=get_keyboard(uid)); return
     await state.update_data(tr_type="prestige")
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"⭐ **تأیید پرستیژ {nx}**\n\n"
-            f"💰 هزینه: **{format_coins(p)}**\n"
+    text = (f"⭐ **پرستیژ {nx}**\n\n💰 **{format_coins(p)}**\n"
             f"⭐ ضریب جدید: **{user['prestige_multiplier']*1.5:.2f}x**\n\n"
-            f"⚠️ **همه چیز ریست می‌شود:**\n"
-            f"• سکه، لول، XP، انبار، زمین‌ها، ارتقاءها، کارگرها\n\n"
-            f"✅ **باقی می‌ماند:**\n"
-            f"• نام، پرستیژ، کلن، ققنوس، افتخارات، شماره حساب بانکی\n\n"
-            f"آیا مطمئنی؟")
+            f"⚠️ **ریست:** سکه، لول، XP، انبار، زمین‌ها، ارتقاءها\n"
+            f"✅ **باقی:** نام، پرستیژ، کلن، ققنوس، افتخارات، حساب بانکی\n\nمطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -4197,7 +4503,7 @@ async def show_pet_menu(callback, user, uid):
     else:
         pt = "ندارد"
     if user.get("phoenix_owned"):
-        text = f"🐾 {pt}\n\n⚠️ ققنوس داری. اسپین ممکن نیست."
+        text = f"🐾 {pt}\n\n⚠️ ققنوس داری."
         kb = InlineKeyboardBuilder()
         kb.button("🔙", callback_data=f"{prefix}back")
         await safe_edit(callback, text, reply_markup=kb.as_markup()); return
@@ -4224,9 +4530,9 @@ async def do_spin(callback, user, uid, et, state):
         await safe_edit(callback, f"❌ نیاز: {format_coins(e['price'])}", reply_markup=get_keyboard(uid)); return
     await state.update_data(tr_type="spin", tr_egg_type=et)
     await state.set_state(UserForm.confirm_transfer)
-    text = (f"🥚 **تأیید باز کردن {e['name']}**\n\n"
-            f"💰 هزینه: **{format_coins(e['price'])}**\n\n"
-            f"⚠️ پت فعلی از بین می‌ره!\n🎁 یک پت رندوم می‌گیری.\n\nمطمئنی؟")
+    text = (f"🥚 **باز کردن {e['name']}**\n\n"
+            f"💰 **{format_coins(e['price'])}**\n\n"
+            f"⚠️ پت فعلی از بین می‌ره!\n🎁 یک پت رندوم.\n\nمطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
     kb.button("❌ لغو", callback_data="confirm_no")
@@ -4314,22 +4620,79 @@ async def handle_text_commands(message: Message, state: FSMContext):
         print(f"Error: {e}")
 
 
+# ==================== BACKGROUND LOOPS ====================
+async def bank_interest_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            await asyncio.to_thread(apply_interest_all_users)
+        except Exception as e:
+            print(f"❌ Interest: {e}")
+        await asyncio.sleep(3600)
+
+
+async def loan_check_loop():
+    await asyncio.sleep(90)
+    while True:
+        try:
+            notifications = await asyncio.to_thread(check_overdue_loans)
+            for uid, text in notifications:
+                try:
+                    await bot.send_message(int(uid), text)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"❌ Loan: {e}")
+        await asyncio.sleep(300)
+
+
+async def trim_loop():
+    await asyncio.sleep(300)
+    while True:
+        try:
+            await asyncio.to_thread(trim_old_data)
+        except Exception as e:
+            print(f"❌ Trim: {e}")
+        await asyncio.sleep(3600)
+
+
 # ==================== MAIN ====================
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     print(f"🤖 ربات روشن شد... Admin IDs: {ADMIN_IDS}")
+
+    load_data()
+    print("✅ Data loaded")
+
     async def stop_delay():
         await asyncio.sleep(340 * 60)
         print("⏰ توقف...")
         try:
+            if _DATA_DIRTY:
+                await asyncio.to_thread(_write_to_disk)
+        except Exception:
+            pass
+        try:
             await dp.stop_polling()
         except Exception:
             pass
+
     asyncio.create_task(stop_delay())
+    asyncio.create_task(saver_loop())
+    asyncio.create_task(bank_interest_loop())
+    asyncio.create_task(loan_check_loop())
+    asyncio.create_task(trim_loop())
+    asyncio.create_task(daily_backup_loop())
+
     try:
         await dp.start_polling(bot)
     except Exception as e:
         print(f"متوقف: {e}")
+        try:
+            if _DATA_DIRTY:
+                await asyncio.to_thread(_write_to_disk)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
