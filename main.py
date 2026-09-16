@@ -2355,7 +2355,7 @@ async def bank_loan_hours_input(message: Message, state: FSMContext):
     if await check_jail_and_block(message, user, uid):
         await state.clear(); return
     try:
-        hours = float(message.text.strip())
+        hours = int(message.text.strip())
         if hours <= 0 or hours > 72:
             raise ValueError
     except Exception:
