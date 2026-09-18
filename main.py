@@ -49,6 +49,11 @@ GLOBAL_KEYS = ["game_start_time", "first_run_time", "leaderboard", "leagues",
                "active_event", "gift_codes", "banned", "clan_requests", "market",
                "shop_history"]
 
+DEFAULT_GLOBAL_VALUES = {
+    "leaderboard": [], "leagues": {}, "clans": {}, "gift_codes": {},
+    "banned": [], "clan_requests": {}, "shop_history": []
+}
+
 FRUITS = ["توت‌فرنگی", "گوجه", "سیب", "پرتقال", "نارگیل", "آناناس", "میوه اژدها"]
 PRICES = [(1, 3), (15, 38), (304, 760), (9120, 22800),
           (456000, 1140000), (27360000, 68400000), (2052000000, 5130000000)]
@@ -379,7 +384,7 @@ def _ensure_keys(data):
     if not isinstance(data, dict):
         return create_default_data()
     for k, v in create_default_data().items():
-        if k not in data:
+        if k not in data or data[k] is None:
             data[k] = v
     if not data.get("first_run_time"):
         data["first_run_time"] = data.get("game_start_time") or datetime.now().isoformat()
@@ -561,6 +566,9 @@ def _write_to_disk():
 
         try:
             global_snap = {k: data.get(k) for k in GLOBAL_KEYS}
+            for k in DEFAULT_GLOBAL_VALUES:
+                if global_snap.get(k) is None:
+                    global_snap[k] = DEFAULT_GLOBAL_VALUES[k]
             global_json = json.dumps(global_snap, ensure_ascii=False, sort_keys=True)
             if global_json != _LAST_GLOBAL_JSON:
                 _write_json(GLOBAL_FILE, global_snap)
@@ -599,7 +607,10 @@ def merge_to_single_file():
     data = load_data()
     single = {}
     for k in GLOBAL_KEYS:
-        single[k] = data.get(k)
+        val = data.get(k)
+        if val is None:
+            val = DEFAULT_GLOBAL_VALUES.get(k)
+        single[k] = val
     single["users"] = data.get("users", {})
     single["clans"] = data.get("clans", {})
     try:
@@ -665,7 +676,7 @@ def trim_old_data():
     now = datetime.now()
     changed = False
 
-    gc = data.get("gift_codes", {})
+    gc = data.get("gift_codes") or {}
     expired = []
     for code, cd in gc.items():
         try:
@@ -678,7 +689,7 @@ def trim_old_data():
         del gc[code]
         changed = True
 
-    sh = data.get("shop_history", [])
+    sh = data.get("shop_history") or []
     if sh:
         cutoff = now - timedelta(days=7)
         new_sh = []
@@ -700,7 +711,7 @@ def trim_old_data():
             user["bank"] = bank
             changed = True
 
-    reqs = data.get("clan_requests", {})
+    reqs = data.get("clan_requests") or {}
     old = []
     for uid, r in reqs.items():
         try:
@@ -1116,7 +1127,7 @@ def get_land_price(cp):
 
 
 def is_banned(user_id):
-    return str(user_id) in load_data().get("banned", [])
+    return str(user_id) in (load_data().get("banned") or [])
 
 
 def get_initial_coins_for_prestige(user):
@@ -2205,7 +2216,7 @@ async def cmd_shop_history(message: Message):
     if not is_admin(message.from_user.id):
         return
     data = load_data()
-    history = data.get("shop_history", [])
+    history = data.get("shop_history") or []
     now = datetime.now()
     cutoff = now - timedelta(days=7)
 
@@ -3059,11 +3070,13 @@ async def on_successful_payment(message: Message, state: FSMContext):
 
     try:
         _data = load_data()
-        for entry in _data.get("shop_history", []):
+        hist = _data.get("shop_history") or []
+        for entry in hist:
             if entry.get("payload") == sp.invoice_payload and entry.get("status") == "pending":
                 entry["status"] = "success"
                 entry["completed_at"] = datetime.now().isoformat()
                 break
+        _data["shop_history"] = hist
         save_data(_data)
     except Exception as e:
         print(f"History update error: {e}")
@@ -3113,7 +3126,7 @@ async def handle_gift_codes(message: Message, state: FSMContext):
     if text.split()[0] in known:
         return
     data = load_data()
-    codes = data.get("gift_codes", {})
+    codes = data.get("gift_codes") or {}
     if text not in codes:
         return
     cd = codes[text]
@@ -3148,7 +3161,7 @@ async def clan_accept(callback: CallbackQuery):
     leader_id = callback.from_user.id
     target_id = callback.data.replace("clan_accept_", "")
     data = load_data()
-    req = data.get("clan_requests", {}).get(target_id)
+    req = (data.get("clan_requests") or {}).get(target_id)
     if not req:
         await safe_edit(callback, "❌ پیدا نشد."); return
     cid = req["clan_id"]
@@ -3184,7 +3197,7 @@ async def clan_reject(callback: CallbackQuery):
     await safe_answer(callback)
     target_id = callback.data.replace("clan_reject_", "")
     data = load_data()
-    req = data.get("clan_requests", {}).pop(target_id, None)
+    req = (data.get("clan_requests") or {}).pop(target_id, None)
     save_data(data)
     if req:
         await safe_edit(callback, "❌ رد شد.")
@@ -3462,7 +3475,10 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
                 ti = format_coins(coins)
                 de = f"{amount:,} تومان"
             _data = load_data()
-            _data.setdefault("shop_history", []).append({
+            hist = _data.get("shop_history")
+            if hist is None:
+                hist = []
+            hist.append({
                 "user_id": str(uid),
                 "name": user.get("name", "?"),
                 "amount_toman": amount,
@@ -3472,6 +3488,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
                 "completed_at": None,
                 "payload": pl,
             })
+            _data["shop_history"] = hist
             save_data(_data)
             kwargs = dict(chat_id=uid, title=ti, description=de,
                           payload=pl, provider_token=PROVIDER_TOKEN)
