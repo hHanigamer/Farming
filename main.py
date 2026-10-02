@@ -341,6 +341,7 @@ def create_default_bank():
         "history": [],
         "loan": None,
         "loan_banned_until": None,
+        "loan_snapshot": None,
         "in_jail": False,
         "jail_until": None,
         "jail_work_count": 0,
@@ -1178,24 +1179,87 @@ def _set_ban_if_not_active(bank, now, days=7):
     return True
 
 
+def _apply_snapshot_to_user(user, snapshot, now):
+    if not snapshot:
+        return False
+
+    restored_plots = []
+    for p in snapshot.get("plots", []):
+        p_copy = dict(p)
+        if p_copy.get("state") == "growing":
+            ht = p_copy.get("harvest_time")
+            if ht:
+                try:
+                    if now >= datetime.fromisoformat(ht):
+                        p_copy["state"] = "harvested"
+                        p_copy["harvest_time"] = None
+                except Exception:
+                    pass
+        restored_plots.append(p_copy)
+    if not restored_plots:
+        restored_plots = [{"fruit": 0, "state": "idle", "harvest_time": None}]
+    user["plots"] = restored_plots
+    user["max_plots"] = snapshot.get("max_plots", 1)
+    user["inventory"] = snapshot.get("inventory", {})
+    user["upgrades"] = snapshot.get("upgrades", {"auto_water": 0, "golden_pot": 0, "professional_seeder": 0})
+
+    restored_workers = snapshot.get("workers", {})
+    default_workers = {
+        "planting": {"active": False, "fruit": None, "hours": 0, "expires_at": None, "paused": False, "paused_at": None},
+        "harvest_sell": {"active": False, "hours": 0, "expires_at": None, "paused": False, "paused_at": None},
+    }
+    for wk in ["planting", "harvest_sell"]:
+        if wk not in restored_workers:
+            restored_workers[wk] = default_workers[wk]
+        else:
+            w = restored_workers[wk]
+            if w.get("active") and w.get("expires_at"):
+                try:
+                    if now >= datetime.fromisoformat(w["expires_at"]):
+                        w["active"] = False
+                        w["expires_at"] = None
+                        w["fruit"] = None
+                        w["paused"] = False
+                        w["paused_at"] = None
+                except Exception:
+                    pass
+    user["workers"] = restored_workers
+    user["daily_orders"] = snapshot.get("daily_orders", {"orders": [], "completed": False, "completed_at": None, "next_at": None})
+    return True
+
+
 def _reset_after_jail(user, uid):
     initial = get_initial_coins_for_prestige(user)
     purchased = max(0, int(user.get("purchased_coins", 0)))
     new_coins = initial + purchased
     bank = user.get("bank", create_default_bank())
     old_acc = bank.get("account_number")
+    snapshot = bank.get("loan_snapshot")
+
+    update_fields = {
+        "coins": new_coins,
+        "market_holdings": {},
+    }
+
     bank["balance"] = 0
     bank["history"] = []
     bank["balance_history"] = []
     bank["loan"] = None
+    bank["loan_snapshot"] = None
     if old_acc:
         bank["account_number"] = old_acc
-    user["bank"] = bank
-    update_user(uid, {
-        "coins": new_coins,
-        "bank": bank,
-        "market_holdings": {},
-    })
+    update_fields["bank"] = bank
+
+    if snapshot:
+        _apply_snapshot_to_user(user, snapshot, datetime.now())
+        update_fields["plots"] = user["plots"]
+        update_fields["max_plots"] = user["max_plots"]
+        update_fields["inventory"] = user["inventory"]
+        update_fields["upgrades"] = user["upgrades"]
+        update_fields["workers"] = user["workers"]
+        update_fields["daily_orders"] = user["daily_orders"]
+
+    update_user(uid, update_fields)
     return new_coins
 
 
@@ -1357,6 +1421,7 @@ def check_overdue_loans():
                 if coins >= penalty:
                     user["coins"] = max(0, coins - penalty)
                     bank["loan"] = None
+                    bank["loan_snapshot"] = None
                     _set_ban_if_not_active(bank, now)
                     notifications.append((uid,
                         f"💸 **وام معوق!**\n\n"
@@ -3784,6 +3849,15 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         bank["loan"] = {"amount": amt, "total_due": total_due,
                         "start_time": datetime.now().isoformat(),
                         "due_time": due_time.isoformat(), "warning_sent": False}
+        bank["loan_snapshot"] = {
+            "plots": json.loads(json.dumps(user.get("plots", []))),
+            "max_plots": user.get("max_plots", 1),
+            "inventory": json.loads(json.dumps(user.get("inventory", {}))),
+            "upgrades": json.loads(json.dumps(user.get("upgrades", {}))),
+            "workers": json.loads(json.dumps(user.get("workers", {}))),
+            "daily_orders": json.loads(json.dumps(user.get("daily_orders", {}))),
+            "saved_at": datetime.now().isoformat(),
+        }
         nc = user["coins"] + amt
         update_user(uid, {"coins": nc, "bank": bank})
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
@@ -3965,6 +4039,7 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
                 reply_markup=get_keyboard(uid)); return
         nc = max(0, user["coins"] - total_due)
         bank["loan"] = None
+        bank["loan_snapshot"] = None
         update_user(uid, {"coins": nc, "bank": bank})
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
         await safe_edit(callback, f"✅ **وام پرداخت شد!**\n💰 {format_coins(total_due)}\n💼 {format_coins(nc)}", reply_markup=get_keyboard(uid))
