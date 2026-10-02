@@ -1926,12 +1926,13 @@ async def check_jail_and_block(message_or_callback, user, uid):
         try:
             jail_until = datetime.fromisoformat(jail_until_str)
             if datetime.now() >= jail_until:
+                now = datetime.now()
                 bank["in_jail"] = False
                 bank["jail_until"] = None
                 bank["jail_work_count"] = 0
                 bank["jail_ready_to_pay"] = False
                 if bank.get("jail_reason") == "loan_overdue":
-                    bank["loan_banned_until"] = None
+                    _set_ban_if_not_active(bank, now, days=7)
                     bank["jail_reason"] = None
                 user["bank"] = bank
                 _reset_after_jail(user, uid)
@@ -3526,7 +3527,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         nu["achievements"] = user.get("achievements", [])
         nu["clan_id"] = user.get("clan_id")
         nu["phoenix_owned"] = user.get("phoenix_owned", False)
-        nu["purchased_coins"] = user.get("purchased_coins", 0)
+        nu["purchased_coins"] = 0
         if nu["phoenix_owned"]:
             nu["pet"] = PHOENIX_PET
         nu["last_seen_period"] = get_period_number()
@@ -3927,12 +3928,13 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             except Exception:
                 pass
         if expired:
+            now = datetime.now()
             bank["in_jail"] = False
             bank["jail_until"] = None
             bank["jail_work_count"] = 0
             bank["jail_ready_to_pay"] = False
             if bank.get("jail_reason") == "loan_overdue":
-                bank["loan_banned_until"] = None
+                _set_ban_if_not_active(bank, now, days=7)
                 bank["jail_reason"] = None
             user["bank"] = bank
             _reset_after_jail(user, uid)
@@ -4010,13 +4012,14 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         return
     if data == "jail_pay":
         bank = user.get("bank", {})
+        now = datetime.now()
         bank["in_jail"] = False
         bank["jail_until"] = None
         bank["jail_work_count"] = 0
         bank["jail_ready_to_pay"] = False
         bank["loan"] = None
         if bank.get("jail_reason") == "loan_overdue":
-            bank["loan_banned_until"] = None
+            _set_ban_if_not_active(bank, now, days=7)
             bank["jail_reason"] = None
         user["bank"] = bank
         _reset_after_jail(user, uid)
