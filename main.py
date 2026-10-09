@@ -1,14 +1,14 @@
 import json
 import os
 import random
-import shutil
 import asyncio
 import logging
 import sys
+import time as _time
 from datetime import datetime, timedelta
 from filelock import FileLock
 
-from baleio import Bot, Dispatcher, md, F
+from baleio import Bot, Dispatcher, F
 from baleio.client.default import DefaultBotProperties
 from baleio.enums import ParseMode
 from baleio.filters import Command, CommandStart
@@ -45,13 +45,24 @@ _LAST_CLAN_JSON = {}
 _LAST_GLOBAL_JSON = ""
 _MODIFIED_USERS = set()
 
+# ✅ FIX 5: cache برای جلوگیری از پردازش مکرر
+_LAST_PROCESS_CACHE = {}   # uid -> timestamp
+_PROCESS_COOLDOWN = 5      # ثانیه
+
+# ✅ FIX 21: Timezone تهران
+TEHRAN_OFFSET = timedelta(hours=3, minutes=30)
+
+def now():
+    """زمان فعلی به وقت تهران (naive)"""
+    return datetime.utcnow() + TEHRAN_OFFSET
+
 GLOBAL_KEYS = ["game_start_time", "first_run_time", "leaderboard", "leagues",
                "active_event", "gift_codes", "banned", "clan_requests", "market",
-               "shop_history"]
+               "shop_history", "processed_charges"]
 
 DEFAULT_GLOBAL_VALUES = {
     "leaderboard": [], "leagues": {}, "clans": {}, "gift_codes": {},
-    "banned": [], "clan_requests": {}, "shop_history": []
+    "banned": [], "clan_requests": {}, "shop_history": [], "processed_charges": []
 }
 
 FRUITS = ["توت‌فرنگی", "گوجه", "سیب", "پرتقال", "نارگیل", "آناناس", "میوه اژدها"]
@@ -186,8 +197,12 @@ TEXT_COMMANDS = {
 }
 
 
+# ✅ FIX 14: is_admin مقاوم
 def is_admin(user_id):
-    return int(user_id) in ADMIN_IDS and len(ADMIN_IDS) > 0
+    try:
+        return int(user_id) in ADMIN_IDS
+    except (ValueError, TypeError):
+        return False
 
 
 class UserForm(StatesGroup):
@@ -283,6 +298,16 @@ async def safe_edit(callback, text, **kwargs):
             pass
 
 
+# ✅ FIX 5: تابع چک cooldown
+def _should_process(uid):
+    t = _time.time()
+    last = _LAST_PROCESS_CACHE.get(str(uid), 0)
+    if t - last < _PROCESS_COOLDOWN:
+        return False
+    _LAST_PROCESS_CACHE[str(uid)] = t
+    return True
+
+
 def _ensure_dirs():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(USERS_DIR, exist_ok=True)
@@ -312,7 +337,7 @@ def _read_json(path):
 def create_default_market():
     return {
         "state": "normal",
-        "last_update": datetime.now().isoformat(),
+        "last_update": now().isoformat(),
         "currencies": {
             cid: {"base_price": float(c["base_price"]),
                   "price": float(c["base_price"]),
@@ -324,19 +349,19 @@ def create_default_market():
 
 
 def create_default_data():
-    now = datetime.now().isoformat()
-    return {"game_start_time": now, "first_run_time": now, "users": {},
+    n = now().isoformat()
+    return {"game_start_time": n, "first_run_time": n, "users": {},
             "leaderboard": [], "clans": {}, "leagues": {},
             "active_event": None, "gift_codes": {}, "banned": [],
             "clan_requests": {}, "market": create_default_market(),
-            "shop_history": []}
+            "shop_history": [], "processed_charges": []}
 
 
 def create_default_bank():
     return {
         "account_number": None,
         "balance": 0,
-        "last_interest": datetime.now().isoformat(),
+        "last_interest": now().isoformat(),
         "balance_history": [],
         "history": [],
         "loan": None,
@@ -353,7 +378,7 @@ def create_default_bank():
 
 
 def create_default_user(user_id):
-    now = datetime.now().isoformat()
+    n = now().isoformat()
     return {
         "name": "", "level": 1, "xp": 0, "coins": 1,
         "purchased_coins": 0,
@@ -368,12 +393,12 @@ def create_default_user(user_id):
         "prestige": 0, "prestige_multiplier": 1.0,
         "referral_code": f"REF{user_id}{random.randint(100,999)}",
         "pet": None, "phoenix_owned": False, "clan_id": None,
-        "period_start_coins": 1, "period_start_time": now,
+        "period_start_coins": 1, "period_start_time": n,
         "current_period": 1, "last_seen_period": 1,
         "achievements": [], "pending_purchase": None, "used_gift_codes": [],
         "market_holdings": {},
         "bank": create_default_bank(),
-        "last_activity": now,
+        "last_activity": n,
     }
 
 
@@ -384,7 +409,7 @@ def _ensure_keys(data):
         if k not in data or data[k] is None:
             data[k] = v
     if not data.get("first_run_time"):
-        data["first_run_time"] = data.get("game_start_time") or datetime.now().isoformat()
+        data["first_run_time"] = data.get("game_start_time") or now().isoformat()
     return data
 
 
@@ -451,7 +476,7 @@ def _migrate_user(u, gst):
     bank = u.get("bank", {})
     bh = bank.get("balance_history", [])
     if bh:
-        cutoff = datetime.now() - timedelta(hours=24)
+        cutoff = now() - timedelta(hours=24)
         new_bh = []
         for h in bh:
             try:
@@ -516,7 +541,7 @@ def load_data():
             data["clans"] = clans
 
         data = _ensure_keys(data)
-        gst = data.get("game_start_time", datetime.now().isoformat())
+        gst = data.get("game_start_time", now().isoformat())
         for uid, u in data.get("users", {}).items():
             _migrate_user(u, gst)
 
@@ -626,7 +651,7 @@ async def saver_loop():
     _SAVE_TRIGGER = asyncio.Event()
     while True:
         try:
-            await asyncio.wait_for(_SAVE_TRIGGER.wait(), timeout=30)
+            await asyncio.wait_for(_SAVE_TRIGGER.wait(), timeout=120)  # ✅ FIX 22
         except asyncio.TimeoutError:
             pass
         _SAVE_TRIGGER.clear()
@@ -660,18 +685,18 @@ async def market_loop():
 
 
 async def user_process_loop():
-    await asyncio.sleep(60)
+    await asyncio.sleep(90)
     while True:
         try:
             await asyncio.to_thread(process_all_users)
         except Exception as e:
             print(f"❌ User process loop: {e}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(90)  # ✅ FIX 23
 
 
 def trim_old_data():
     data = load_data()
-    now = datetime.now()
+    n = now()
     changed = False
 
     gc = data.get("gift_codes") or {}
@@ -679,7 +704,7 @@ def trim_old_data():
     for code, cd in gc.items():
         try:
             end = datetime.fromisoformat(cd.get("end_time", ""))
-            if (now - end).days > 7:
+            if (n - end).days > 7:
                 expired.append(code)
         except Exception:
             pass
@@ -689,7 +714,7 @@ def trim_old_data():
 
     sh = data.get("shop_history") or []
     if sh:
-        cutoff = now - timedelta(days=7)
+        cutoff = n - timedelta(days=7)
         new_sh = []
         for e in sh:
             try:
@@ -714,7 +739,7 @@ def trim_old_data():
     for uid, r in reqs.items():
         try:
             created = datetime.fromisoformat(r.get("created_at", ""))
-            if (now - created).days > 3:
+            if (n - created).days > 3:
                 old.append(uid)
         except Exception:
             pass
@@ -722,13 +747,19 @@ def trim_old_data():
         del reqs[uid]
         changed = True
 
+    # ✅ FIX 2: trim processed_charges
+    pc = data.get("processed_charges") or []
+    if len(pc) > 2000:
+        data["processed_charges"] = pc[-1000:]
+        changed = True
+
     if changed:
         save_data(data)
 
 
-def _record_balance(user, now=None):
-    if now is None:
-        now = datetime.now()
+def _record_balance(user, n=None):
+    if n is None:
+        n = now()
     bank = user.get("bank", {})
     current = bank.get("balance", 0)
     history = bank.get("balance_history", [])
@@ -737,14 +768,14 @@ def _record_balance(user, now=None):
         try:
             last = history[-1]
             last_time = datetime.fromisoformat(last["time"])
-            if last.get("balance") == current and (now - last_time).total_seconds() < 1800:
+            if last.get("balance") == current and (n - last_time).total_seconds() < 1800:
                 return
         except Exception:
             pass
 
-    history.append({"time": now.isoformat(), "balance": current})
+    history.append({"time": n.isoformat(), "balance": current})
 
-    cutoff = now - timedelta(hours=24)
+    cutoff = n - timedelta(hours=24)
     new_history = []
     for h in history:
         try:
@@ -768,7 +799,7 @@ def update_user(user_id, updates):
     if uid_str not in data["users"]:
         data["users"][uid_str] = create_default_user(user_id)
     data["users"][uid_str].update(updates)
-    data["users"][uid_str]["last_activity"] = datetime.now().isoformat()
+    data["users"][uid_str]["last_activity"] = now().isoformat()
     _MODIFIED_USERS.add(uid_str)
     save_data(data)
 
@@ -835,7 +866,7 @@ def get_active_event():
         return None
     try:
         end = datetime.fromisoformat(ev["end_time"])
-        if datetime.now() >= end:
+        if now() >= end:
             data["active_event"] = None
             save_data(data)
             return None
@@ -871,7 +902,7 @@ def get_plot_remaining(plot):
     if not ht:
         return None
     try:
-        return max(0, int((datetime.fromisoformat(ht) - datetime.now()).total_seconds()))
+        return max(0, int((datetime.fromisoformat(ht) - now()).total_seconds()))
     except Exception:
         return None
 
@@ -882,12 +913,13 @@ def check_all_harvests(user_id):
     if not user:
         return False
     changed = False
+    n = now()
     for plot in user.get("plots", []):
         if plot.get("state") == "growing":
             ht = plot.get("harvest_time")
             if ht:
                 try:
-                    if datetime.now() >= datetime.fromisoformat(ht):
+                    if n >= datetime.fromisoformat(ht):
                         plot["state"] = "harvested"
                         plot["harvest_time"] = None
                         changed = True
@@ -901,10 +933,10 @@ def check_all_harvests(user_id):
 
 def get_current_season():
     data = load_data()
-    s = data.get("game_start_time", datetime.now().isoformat())
+    s = data.get("game_start_time", now().isoformat())
     try:
         start = datetime.fromisoformat(s)
-        elapsed = (datetime.now() - start).total_seconds() / 60
+        elapsed = (now() - start).total_seconds() / 60
         return SEASON_CYCLE[int(elapsed // SEASON_DURATION_MIN) % len(SEASON_CYCLE)]
     except Exception:
         return "spring"
@@ -918,7 +950,10 @@ def get_season_effects():
     elif season == "summer":
         e["golden_chance"] = 0.02 * 1.75
     elif season == "autumn":
-        e["sell_mult"] = random.uniform(1.25, 1.5)
+        # ✅ FIX 1: مقدار ثابت بر اساس ساعت (به جای random)
+        current_minute = int(_time.time() // 60)
+        rng = random.Random(current_minute)
+        e["sell_mult"] = rng.uniform(1.25, 1.5)
     elif season == "winter":
         e["buy_mult"] = 1 / 1.2
     ev = get_active_event()
@@ -964,7 +999,7 @@ def create_clan(clan_id, name, lid, lname):
         return False
     data["clans"][clan_id] = {"name": name, "leader_id": lid, "leader_name": lname,
         "level": 1, "treasury": 0, "members": [lid],
-        "member_names": {lid: lname}, "created_at": datetime.now().isoformat()}
+        "member_names": {lid: lname}, "created_at": now().isoformat()}
     save_data(data)
     return True
 
@@ -986,11 +1021,11 @@ def get_clan_leaderboard():
     return sorted_clans[:100]
 
 
-def get_week_number(s, now=None):
+def get_week_number(s, n=None):
     start = datetime.fromisoformat(s)
-    if now is None:
-        now = datetime.now()
-    return int((now - start).total_seconds() / (7 * 24 * 3600)) + 1
+    if n is None:
+        n = now()
+    return int((n - start).total_seconds() / (7 * 24 * 3600)) + 1
 
 
 def get_period_number():
@@ -1019,7 +1054,7 @@ def ensure_user_in_league(user_id, user):
     per_key = f"period_{pn}"
     data = load_data()
     data.setdefault("leagues", {}).setdefault(pk, {}).setdefault(per_key,
-        {"started_at": user.get("period_start_time", datetime.now().isoformat()), "members": {}})
+        {"started_at": user.get("period_start_time", now().isoformat()), "members": {}})
     profit = user["coins"] - user.get("period_start_coins", 1)
     data["leagues"][pk][per_key]["members"][str(user_id)] = {
         "name": user.get("name", "?"), "profit": profit}
@@ -1045,7 +1080,7 @@ def process_period_end(pn, user, uid_str):
     rank = next((i+1 for i, (uid, _) in enumerate(sm) if uid == uid_str), 0)
     if rank == 0:
         return
-    ach_date = datetime.now().strftime("%Y-%m-%d")
+    ach_date = now().strftime("%Y-%m-%d")
     prestige = user.get("prestige", 0)
     if total < 10:
         user.setdefault("achievements", []).append({"type": "lone_eagle", "rank": rank, "period": pn, "league": prestige, "date": ach_date})
@@ -1062,6 +1097,7 @@ def process_period_end(pn, user, uid_str):
 
 
 def check_period_reset(user_id):
+    # ✅ FIX 10: فقط دوره آخر پردازش می‌شه
     data = load_data()
     cp = get_period_number()
     user = data["users"].get(str(user_id))
@@ -1069,10 +1105,10 @@ def check_period_reset(user_id):
         return False
     lp = user.get("last_seen_period", cp)
     if cp > lp:
-        for p in range(lp, cp):
-            process_period_end(p, user, str(user_id))
+        # فقط آخرین دوره
+        process_period_end(cp - 1, user, str(user_id))
         user["period_start_coins"] = user["coins"]
-        user["period_start_time"] = datetime.now().isoformat()
+        user["period_start_time"] = now().isoformat()
         user["current_period"] = cp
         user["last_seen_period"] = cp
         _MODIFIED_USERS.add(str(user_id))
@@ -1166,20 +1202,20 @@ def get_sell_bonus(user):
     return 1 + 0.1 * lvl
 
 
-def _set_ban_if_not_active(bank, now, days=7):
+def _set_ban_if_not_active(bank, n, days=7):
     existing = bank.get("loan_banned_until")
     if existing:
         try:
             e = datetime.fromisoformat(existing)
-            if e > now:
+            if e > n:
                 return False
         except Exception:
             pass
-    bank["loan_banned_until"] = (now + timedelta(days=days)).isoformat()
+    bank["loan_banned_until"] = (n + timedelta(days=days)).isoformat()
     return True
 
 
-def _apply_snapshot_to_user(user, snapshot, now):
+def _apply_snapshot_to_user(user, snapshot, n):
     if not snapshot:
         return False
 
@@ -1190,7 +1226,7 @@ def _apply_snapshot_to_user(user, snapshot, now):
             ht = p_copy.get("harvest_time")
             if ht:
                 try:
-                    if now >= datetime.fromisoformat(ht):
+                    if n >= datetime.fromisoformat(ht):
                         p_copy["state"] = "harvested"
                         p_copy["harvest_time"] = None
                 except Exception:
@@ -1215,7 +1251,7 @@ def _apply_snapshot_to_user(user, snapshot, now):
             w = restored_workers[wk]
             if w.get("active") and w.get("expires_at"):
                 try:
-                    if now >= datetime.fromisoformat(w["expires_at"]):
+                    if n >= datetime.fromisoformat(w["expires_at"]):
                         w["active"] = False
                         w["expires_at"] = None
                         w["fruit"] = None
@@ -1251,7 +1287,7 @@ def _reset_after_jail(user, uid):
     update_fields["bank"] = bank
 
     if snapshot:
-        _apply_snapshot_to_user(user, snapshot, datetime.now())
+        _apply_snapshot_to_user(user, snapshot, now())
         update_fields["plots"] = user["plots"]
         update_fields["max_plots"] = user["max_plots"]
         update_fields["inventory"] = user["inventory"]
@@ -1263,22 +1299,22 @@ def _reset_after_jail(user, uid):
     return new_coins
 
 
-def _apply_interest_to_user(user, now):
+def _apply_interest_to_user(user, n):
     bank = user.get("bank", create_default_bank())
     last_str = bank.get("last_interest")
     if not last_str:
-        bank["last_interest"] = now.isoformat()
+        bank["last_interest"] = n.isoformat()
         user["bank"] = bank
-        _record_balance(user, now)
+        _record_balance(user, n)
         return
     try:
         last = datetime.fromisoformat(last_str)
     except Exception:
-        bank["last_interest"] = now.isoformat()
+        bank["last_interest"] = n.isoformat()
         user["bank"] = bank
-        _record_balance(user, now)
+        _record_balance(user, n)
         return
-    elapsed_days = (now - last).total_seconds() / 86400
+    elapsed_days = (n - last).total_seconds() / 86400
     if elapsed_days >= 1:
         days = int(elapsed_days)
         balance = bank.get("balance", 0)
@@ -1288,10 +1324,10 @@ def _apply_interest_to_user(user, now):
         bank["last_interest"] = (last + timedelta(days=days)).isoformat()
         history = bank.get("history", [])
         history.append({"type": "interest", "amount": added,
-                        "time": now.isoformat(), "days": days})
+                        "time": n.isoformat(), "days": days})
         bank["history"] = history[-50:]
     user["bank"] = bank
-    _record_balance(user, now)
+    _record_balance(user, n)
 
 
 def update_bank_interest(user_id):
@@ -1299,19 +1335,19 @@ def update_bank_interest(user_id):
     user = data["users"].get(str(user_id))
     if not user:
         return
-    _apply_interest_to_user(user, datetime.now())
+    _apply_interest_to_user(user, now())
     _MODIFIED_USERS.add(str(user_id))
     save_data(data)
 
 
 def apply_interest_all_users():
     data = load_data()
-    now = datetime.now()
+    n = now()
     changed = False
     for uid, user in data.get("users", {}).items():
         try:
             bank_before = user.get("bank", {}).get("last_interest")
-            _apply_interest_to_user(user, now)
+            _apply_interest_to_user(user, n)
             if user.get("bank", {}).get("last_interest") != bank_before:
                 changed = True
                 _MODIFIED_USERS.add(uid)
@@ -1322,9 +1358,10 @@ def apply_interest_all_users():
 
 
 def get_avg_balance_24h(user):
+    # ✅ FIX 12: نرمال‌سازی برای تاریخچه ناقص
     bank = user.get("bank", {})
-    now = datetime.now()
-    cutoff = now - timedelta(hours=24)
+    n = now()
+    cutoff = n - timedelta(hours=24)
     current = bank.get("balance", 0)
 
     history = bank.get("balance_history", [])
@@ -1337,20 +1374,34 @@ def get_avg_balance_24h(user):
             continue
     entries.sort(key=lambda x: x[0])
 
-    prev_time = cutoff
+    if not entries:
+        return current
+
+    # پیدا کردن قدیمی‌ترین entry
+    oldest_t = entries[0][0]
+    if oldest_t > cutoff:
+        # تاریخچه کمتر از ۲۴ ساعت
+        start_t = oldest_t
+        span = (n - start_t).total_seconds()
+        if span < 60:
+            return current
+    else:
+        start_t = cutoff
+        span = 24 * 3600
+
+    prev_time = start_t
     prev_balance = 0
     for t, bal in entries:
-        if t < cutoff:
+        if t < start_t:
             prev_balance = bal
         else:
             break
 
     total_weighted = 0
-
     for t, bal in entries:
-        if t <= cutoff:
+        if t <= start_t:
             continue
-        if t > now:
+        if t > n:
             break
         duration = (t - prev_time).total_seconds()
         if duration > 0:
@@ -1358,11 +1409,13 @@ def get_avg_balance_24h(user):
         prev_time = t
         prev_balance = bal
 
-    duration = (now - prev_time).total_seconds()
+    duration = (n - prev_time).total_seconds()
     if duration > 0:
         total_weighted += current * duration
 
-    return int(total_weighted / (24 * 3600))
+    if span <= 0:
+        return int(current)
+    return int(total_weighted / span)
 
 
 def calculate_loan_due(amount, hours):
@@ -1389,7 +1442,7 @@ def _update_leaderboard_direct(uid, user):
 
 def check_overdue_loans():
     data = load_data()
-    now = datetime.now()
+    n = now()
     notifications = []
     for uid, user in data.get("users", {}).items():
         try:
@@ -1401,7 +1454,7 @@ def check_overdue_loans():
                 due = datetime.fromisoformat(loan["due_time"])
             except Exception:
                 continue
-            remaining = (due - now).total_seconds()
+            remaining = (due - n).total_seconds()
             total_due = loan.get("total_due", 0)
 
             if 0 < remaining <= 15 * 60 and not loan.get("warning_sent"):
@@ -1422,7 +1475,7 @@ def check_overdue_loans():
                     user["coins"] = max(0, coins - penalty)
                     bank["loan"] = None
                     bank["loan_snapshot"] = None
-                    _set_ban_if_not_active(bank, now)
+                    _set_ban_if_not_active(bank, n)
                     notifications.append((uid,
                         f"💸 **وام معوق!**\n\n"
                         f"💰 جریمه (۱.۵ برابر): **{format_coins(penalty)}**\n"
@@ -1432,7 +1485,7 @@ def check_overdue_loans():
                     user["coins"] = 0
                     bank["loan"] = None
                     bank["in_jail"] = True
-                    bank["jail_until"] = (now + timedelta(days=JAIL_DURATION_DAYS)).isoformat()
+                    bank["jail_until"] = (n + timedelta(days=JAIL_DURATION_DAYS)).isoformat()
                     bank["jail_work_count"] = 0
                     bank["jail_target_works"] = random.randint(JAIL_WORKS_MIN, JAIL_WORKS_MAX)
                     bank["jail_last_work"] = None
@@ -1464,16 +1517,16 @@ def update_market_prices():
         return
     last_str = market.get("last_update")
     if not last_str:
-        market["last_update"] = datetime.now().isoformat()
+        market["last_update"] = now().isoformat()
         save_data(data)
         return
     try:
         last = datetime.fromisoformat(last_str)
     except Exception:
-        market["last_update"] = datetime.now().isoformat()
+        market["last_update"] = now().isoformat()
         save_data(data)
         return
-    elapsed = (datetime.now() - last).total_seconds()
+    elapsed = (now() - last).total_seconds()
     minutes = int(elapsed // 60)
     if minutes < 1:
         return
@@ -1496,7 +1549,7 @@ def update_market_prices():
             cdata["price"] = round(new_price, 4)
             cdata["last_change"] = round(change * 100, 2)
 
-    market["last_update"] = datetime.now().isoformat()
+    market["last_update"] = now().isoformat()
     data["market"] = market
     save_data(data)
 
@@ -1515,14 +1568,14 @@ def get_market_state_fa(s):
     return {"normal": "عادی ⏸", "profit": "سود 📈", "loss": "ضرر 📉"}.get(s, "عادی ⏸")
 
 
-def _process_workers_for_user(user, now, effects):
+def _process_workers_for_user(user, n, effects):
     workers = user.get("workers", {})
     changed = False
     pw = workers.get("planting", {})
     if pw.get("active") and not pw.get("paused"):
         try:
             expires = datetime.fromisoformat(pw["expires_at"])
-            if now >= expires:
+            if n >= expires:
                 pw["active"] = False
                 pw["fruit"] = None
                 pw["expires_at"] = None
@@ -1542,7 +1595,7 @@ def _process_workers_for_user(user, now, effects):
                         sb = get_pet_effect(user, "speed")
                         if sb > 0:
                             gt *= (1 - sb / 100)
-                        ht = now + timedelta(minutes=gt)
+                        ht = n + timedelta(minutes=gt)
                         plot["fruit"] = fi
                         plot["state"] = "growing"
                         plot["harvest_time"] = ht.isoformat()
@@ -1555,7 +1608,7 @@ def _process_workers_for_user(user, now, effects):
     if hw.get("active") and not hw.get("paused"):
         try:
             expires = datetime.fromisoformat(hw["expires_at"])
-            if now >= expires:
+            if n >= expires:
                 hw["active"] = False
                 hw["expires_at"] = None
                 hw["paused"] = False
@@ -1632,9 +1685,9 @@ def process_workers(user_id):
     user = data["users"].get(str(user_id))
     if not user:
         return
-    now = datetime.now()
+    n = now()
     effects, _ = get_season_effects()
-    changed = _process_workers_for_user(user, now, effects)
+    changed = _process_workers_for_user(user, n, effects)
     if changed:
         user["workers"] = user.get("workers", {})
         user["coins"] = max(0, user["coins"])
@@ -1648,8 +1701,8 @@ def process_workers(user_id):
 def process_all_users():
     global _MODIFIED_USERS
     data = load_data()
-    now = datetime.now()
-    cutoff = now - timedelta(hours=24)
+    n = now()
+    cutoff = n - timedelta(days=7)  # ✅ FIX 8: ۷ روز به جای ۲۴ ساعت
     effects, _ = get_season_effects()
     any_changed = False
 
@@ -1679,14 +1732,14 @@ def process_all_users():
                     ht = plot.get("harvest_time")
                     if ht:
                         try:
-                            if now >= datetime.fromisoformat(ht):
+                            if n >= datetime.fromisoformat(ht):
                                 plot["state"] = "harvested"
                                 plot["harvest_time"] = None
                                 changed = True
                         except Exception:
                             pass
 
-            worker_changed = _process_workers_for_user(user, now, effects)
+            worker_changed = _process_workers_for_user(user, n, effects)
             if worker_changed:
                 changed = True
 
@@ -1804,7 +1857,7 @@ def build_status_text(user, user_id):
     if ev:
         try:
             end = datetime.fromisoformat(ev["end_time"])
-            rem = end - datetime.now()
+            rem = end - now()
             text += f"🎉 **ایونت فعال!** ({format_time_remaining(rem.total_seconds())})\n"
         except Exception:
             pass
@@ -1837,7 +1890,7 @@ def build_status_text(user, user_id):
         if pw.get("active"):
             try:
                 exp = datetime.fromisoformat(pw["expires_at"])
-                rem = (exp - datetime.now()).total_seconds()
+                rem = (exp - now()).total_seconds()
                 st = "⏸" if pw.get("paused") else "▶️"
                 text += f"🌱 کارگر کاشت: {st} ({format_time_remaining(rem)})\n"
             except Exception:
@@ -1845,7 +1898,7 @@ def build_status_text(user, user_id):
         if hw.get("active"):
             try:
                 exp = datetime.fromisoformat(hw["expires_at"])
-                rem = (exp - datetime.now()).total_seconds()
+                rem = (exp - now()).total_seconds()
                 st = "⏸" if hw.get("paused") else "▶️"
                 text += f"💼 کارگر برداشت/فروش: {st} ({format_time_remaining(rem)})\n"
             except Exception:
@@ -1925,14 +1978,14 @@ async def check_jail_and_block(message_or_callback, user, uid):
     if jail_until_str:
         try:
             jail_until = datetime.fromisoformat(jail_until_str)
-            if datetime.now() >= jail_until:
-                now = datetime.now()
+            if now() >= jail_until:
+                n = now()
                 bank["in_jail"] = False
                 bank["jail_until"] = None
                 bank["jail_work_count"] = 0
                 bank["jail_ready_to_pay"] = False
                 if bank.get("jail_reason") == "loan_overdue":
-                    _set_ban_if_not_active(bank, now, days=7)
+                    _set_ban_if_not_active(bank, n, days=7)
                     bank["jail_reason"] = None
                 user["bank"] = bank
                 _reset_after_jail(user, uid)
@@ -1952,7 +2005,7 @@ async def show_jail_page(message_or_callback, user, uid):
     if jail_until_str:
         try:
             jail_until = datetime.fromisoformat(jail_until_str)
-            rem = (jail_until - datetime.now()).total_seconds()
+            rem = (jail_until - now()).total_seconds()
             time_left = format_time_remaining(rem)
         except Exception:
             pass
@@ -1975,9 +2028,9 @@ async def show_jail_page(message_or_callback, user, uid):
         if last_work_str:
             try:
                 last = datetime.fromisoformat(last_work_str)
-                if (datetime.now() - last).total_seconds() < JAIL_WORK_INTERVAL_MIN * 60:
+                if (now() - last).total_seconds() < JAIL_WORK_INTERVAL_MIN * 60:
                     can_work = False
-                    rem = JAIL_WORK_INTERVAL_MIN * 60 - (datetime.now() - last).total_seconds()
+                    rem = JAIL_WORK_INTERVAL_MIN * 60 - (now() - last).total_seconds()
                     text += f"\n⏳ کار بعدی: {format_time_remaining(rem)} دیگه"
             except Exception:
                 pass
@@ -2061,7 +2114,7 @@ async def cmd_user_info(message: Message):
         if jail_until:
             try:
                 ju = datetime.fromisoformat(jail_until)
-                rem = (ju - datetime.now()).total_seconds()
+                rem = (ju - now()).total_seconds()
                 if rem > 0:
                     status_lines.append(f"🔒 **زندان** ({format_time_remaining(rem)} دیگه)")
                 else:
@@ -2079,7 +2132,7 @@ async def cmd_user_info(message: Message):
     if banned_until:
         try:
             bu = datetime.fromisoformat(banned_until)
-            rem = (bu - datetime.now()).total_seconds()
+            rem = (bu - now()).total_seconds()
             if rem > 0:
                 status_lines.append(f"🚫 **منع وام** ({format_time_remaining(rem)} دیگه)")
             else:
@@ -2090,7 +2143,7 @@ async def cmd_user_info(message: Message):
     if loan:
         try:
             due = datetime.fromisoformat(loan.get("due_time", ""))
-            rem = (due - datetime.now()).total_seconds()
+            rem = (due - now()).total_seconds()
             if rem > 0:
                 status_lines.append(f"💳 **وام فعال** ({format_time_remaining(rem)} تا سررسید)")
             else:
@@ -2103,7 +2156,7 @@ async def cmd_user_info(message: Message):
     if ev:
         try:
             end = datetime.fromisoformat(ev["end_time"])
-            rem = (end - datetime.now()).total_seconds()
+            rem = (end - now()).total_seconds()
             status_lines.append(f"🎉 **ایونت فعال** ({format_time_remaining(rem)} دیگه)")
         except Exception:
             pass
@@ -2278,6 +2331,7 @@ async def cmd_give_pet(message: Message):
 
 @dp.message(Command("reset_user"))
 async def cmd_reset_user(message: Message):
+    # ✅ FIX 20: حفظ شماره حساب
     if not is_admin(message.from_user.id):
         return
     p = message.text.split()
@@ -2286,6 +2340,8 @@ async def cmd_reset_user(message: Message):
     t = get_user(p[1])
     if not t:
         return
+
+    old_acc = t.get("bank", {}).get("account_number")
 
     old_clan_id = t.get("clan_id")
     if old_clan_id:
@@ -2309,12 +2365,15 @@ async def cmd_reset_user(message: Message):
     nu["referral_code"] = t["referral_code"]
     nu["achievements"] = t.get("achievements", [])
     nu["purchased_coins"] = t.get("purchased_coins", 0)
-    nu["bank"]["account_number"] = t.get("bank", {}).get("account_number") or generate_account_number()
+    nu["bank"]["account_number"] = old_acc or generate_account_number()
     data = load_data()
     data["users"][p[1]] = nu
     _MODIFIED_USERS.add(p[1])
+    # ✅ FIX 9: پاک کردن از cache
+    _LAST_USER_JSON.pop(p[1], None)
+    _LAST_PROCESS_CACHE.pop(p[1], None)
     save_data(data)
-    await message.answer(f"✅ {t['name']} ریست شد.")
+    await message.answer(f"✅ {t['name']} ریست شد.\n🏦 حساب: `{nu['bank']['account_number']}`")
 
 
 @dp.message(Command("ban"))
@@ -2412,8 +2471,8 @@ async def cmd_shop_history(message: Message):
         return
     data = load_data()
     history = data.get("shop_history") or []
-    now = datetime.now()
-    cutoff = now - timedelta(days=7)
+    n = now()
+    cutoff = n - timedelta(days=7)
 
     recent = []
     for e in history:
@@ -2464,7 +2523,7 @@ async def cmd_shop_history(message: Message):
         if e["status"] != "success":
             try:
                 ct = datetime.fromisoformat(e["created_at"])
-                mins = (now - ct).total_seconds() / 60
+                mins = (n - ct).total_seconds() / 60
                 if mins > 30:
                     line += f"  ⚠️ **{int(mins)} دقیقه بدون تأیید**"
                 else:
@@ -2494,22 +2553,28 @@ async def cmd_shop_history(message: Message):
 
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: Message):
+    # ✅ FIX 17: ارسال همزمان با محدودیت
     if not is_admin(message.from_user.id):
         return
     txt = message.text.replace("/broadcast", "", 1).strip()
     if not txt:
         await message.answer("❌ خالی"); return
     data = load_data()
-    s = 0
-    f = 0
-    for u in data.get("users", {}).keys():
-        try:
-            await bot.send_message(int(u), f"📢 **اعلان:**\n\n{txt}")
-            s += 1
-        except Exception:
-            f += 1
-        await asyncio.sleep(0.05)
-    await message.answer(f"✅ {s} | ❌ {f}")
+    all_uids = list(data.get("users", {}).keys())
+    sem = asyncio.Semaphore(20)
+    ok = [0]
+    fail = [0]
+
+    async def send_one(u):
+        async with sem:
+            try:
+                await bot.send_message(int(u), f"📢 **اعلان:**\n\n{txt}")
+                ok[0] += 1
+            except Exception:
+                fail[0] += 1
+
+    await asyncio.gather(*[send_one(u) for u in all_uids])
+    await message.answer(f"✅ {ok[0]} | ❌ {fail[0]}")
 
 
 @dp.message(Command("reset_season"))
@@ -2517,7 +2582,7 @@ async def cmd_reset_season(message: Message):
     if not is_admin(message.from_user.id):
         return
     data = load_data()
-    data["game_start_time"] = datetime.now().isoformat()
+    data["game_start_time"] = now().isoformat()
     save_data(data)
     await message.answer("✅ فصل‌ها ریست شد.")
 
@@ -2543,20 +2608,23 @@ async def cmd_event(message: Message):
         bm = float(p[1]); sm = float(p[2]); gm = float(p[3]); xm = float(p[4]); h = float(p[5]); msg = p[6]
     except Exception as e:
         await message.answer(f"❌ {e}"); return
-    end = datetime.now() + timedelta(hours=h)
+    end = now() + timedelta(hours=h)
     data = load_data()
     data["active_event"] = {"buy_mult": bm, "sell_mult": sm, "growth_mult": gm, "xp_mult": xm,
                              "end_time": end.isoformat(), "message": msg,
-                             "created_at": datetime.now().isoformat()}
+                             "created_at": now().isoformat()}
     save_data(data)
     await message.answer(f"✅ ایونت! Buy×{bm} Sell×{sm} Growth×{gm} XP×{xm} برای {h}h\n📢 {msg}")
     bt = f"🎉 **ایونت!**\n\n{msg}\n\n💰×{bm} 💵×{sm} ⚡×{gm} ⭐×{xm}\n⏰ {h}h"
-    for u in data.get("users", {}).keys():
-        try:
-            await bot.send_message(int(u), bt)
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
+    all_uids = list(data.get("users", {}).keys())
+    sem = asyncio.Semaphore(20)
+    async def send_one(u):
+        async with sem:
+            try:
+                await bot.send_message(int(u), bt)
+            except Exception:
+                pass
+    await asyncio.gather(*[send_one(u) for u in all_uids])
 
 
 @dp.message(Command("end_event"))
@@ -2577,7 +2645,7 @@ async def cmd_events(message: Message):
     if not ev:
         await message.answer("ایونت فعالی نیست."); return
     end = datetime.fromisoformat(ev["end_time"])
-    rem = end - datetime.now()
+    rem = end - now()
     h = int(rem.total_seconds() // 3600)
     m = int((rem.total_seconds() % 3600) // 60)
     await message.answer(f"🎉 **ایونت** ({h}h {m}m)\n💰×{ev['buy_mult']}\n💵×{ev['sell_mult']}\n"
@@ -2608,21 +2676,24 @@ async def cmd_giftcode(message: Message):
             mu = int(ls)
         except Exception:
             await message.answer("❌ all یا عدد."); return
-    end = datetime.now() + timedelta(hours=h)
+    end = now() + timedelta(hours=h)
     data = load_data()
     data.setdefault("gift_codes", {})[code] = {"amount": amt, "max_users": mu,
                                                 "end_time": end.isoformat(),
-                                                "used_by": [], "created_at": datetime.now().isoformat()}
+                                                "used_by": [], "created_at": now().isoformat()}
     save_data(data)
     lt = "همه" if mu == "all" else f"اول {mu} نفر"
     await message.answer(f"✅ گیفت کد!\n🎟️ `{code}`\n💰 {format_coins(amt)}\n👥 {lt}\n⏰ {h}h")
     bt = f"🎟️ **گیفت کد!**\n\nبرای دریافت {format_coins(amt)} ارسال کن:\n`{code}`\n\n⏰ {h}h | 👥 {lt}"
-    for u in data.get("users", {}).keys():
-        try:
-            await bot.send_message(int(u), bt)
-        except Exception:
-            pass
-        await asyncio.sleep(0.05)
+    all_uids = list(data.get("users", {}).keys())
+    sem = asyncio.Semaphore(20)
+    async def send_one(u):
+        async with sem:
+            try:
+                await bot.send_message(int(u), bt)
+            except Exception:
+                pass
+    await asyncio.gather(*[send_one(u) for u in all_uids])
 
 
 @dp.message(Command("market"))
@@ -2649,7 +2720,7 @@ async def cmd_market(message: Message):
     data = load_data()
     market = data.get("market", create_default_market())
     market["state"] = mode
-    market["last_update"] = datetime.now().isoformat()
+    market["last_update"] = now().isoformat()
     data["market"] = market
     save_data(data)
     avg_base = sum(c["base_price"] for c in market["currencies"].values()) / len(market["currencies"])
@@ -2663,10 +2734,12 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     if is_banned(user_id):
         await message.answer("🚫 شما بن شده‌اید."); return
-    check_all_harvests(user_id)
-    process_workers(user_id)
+    # ✅ FIX 5: cooldown
+    if _should_process(user_id):
+        check_all_harvests(user_id)
+        process_workers(user_id)
     check_period_reset(user_id)
-    update_market_prices()
+    # ✅ FIX 4: update_market_prices حذف شد (فقط در market_loop)
     user = get_user(user_id)
     if not user or user.get("name", "") == "":
         await state.set_state(UserForm.name)
@@ -2686,10 +2759,11 @@ async def cmd_status(message: Message, state: FSMContext):
     uid = message.from_user.id
     if is_banned(uid):
         return
-    check_all_harvests(uid)
-    process_workers(uid)
+    if _should_process(uid):
+        check_all_harvests(uid)
+        process_workers(uid)
     check_period_reset(uid)
-    update_market_prices()
+    # ✅ FIX 4: update_market_prices حذف شد
     update_bank_interest(uid)
     user = get_user(uid)
     if not user:
@@ -2886,8 +2960,8 @@ async def bank_loan_amount_input(message: Message, state: FSMContext):
     if banned_until:
         try:
             bu = datetime.fromisoformat(banned_until)
-            if datetime.now() < bu:
-                rem = (bu - datetime.now()).total_seconds()
+            if now() < bu:
+                rem = (bu - now()).total_seconds()
                 await state.clear()
                 await message.answer(f"❌ تا {format_time_remaining(rem)} نمی‌تونی وام بگیری.", reply_markup=get_keyboard(uid)); return
         except Exception:
@@ -2930,7 +3004,7 @@ async def bank_loan_hours_input(message: Message, state: FSMContext):
         await message.answer("❌ عدد صحیح بین ۱ تا ۷۲ ساعت.", reply_markup=get_keyboard(uid)); return
     period_end = get_period_end_datetime(user.get("current_period", 1))
     if period_end:
-        loan_end = datetime.now() + timedelta(hours=hours)
+        loan_end = now() + timedelta(hours=hours)
         if loan_end > period_end:
             await state.clear()
             await message.answer("❌ بعد از اتمام دوره تلاش کنید.", reply_markup=get_keyboard(uid)); return
@@ -3261,6 +3335,7 @@ async def market_sell_amount_input(message: Message, state: FSMContext):
 
 @dp.pre_checkout_query()
 async def on_pre_checkout(query: PreCheckoutQuery):
+    # ✅ FIX: سریع جواب بده
     try:
         await query.answer(ok=True)
     except Exception:
@@ -3269,35 +3344,71 @@ async def on_pre_checkout(query: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def on_successful_payment(message: Message, state: FSMContext):
-    await state.clear()
+    # ✅ FIX 2: dedup با charge_id
+    try:
+        await state.clear()
+    except Exception:
+        pass
+
     sp = message.successful_payment
     uid = message.from_user.id
+
+    # dedup
+    charge_id = None
+    for attr in ("bale_payment_charge_id", "provider_payment_charge_id",
+                 "telegram_payment_charge_id"):
+        v = getattr(sp, attr, None)
+        if v:
+            charge_id = v
+            break
+    if not charge_id:
+        charge_id = sp.invoice_payload + "_" + str(getattr(sp, "total_amount", 0))
+
+    _data = load_data()
+    processed = _data.get("processed_charges") or []
+    if charge_id in processed:
+        try:
+            await message.answer("⚠️ این پرداخت قبلاً ثبت شده است.")
+        except Exception:
+            pass
+        return
+    processed.append(charge_id)
+    _data["processed_charges"] = processed[-2000:]
+
     user = get_user(uid)
     if not user:
+        save_data(_data)
         return
 
+    # history
     try:
-        _data = load_data()
         hist = _data.get("shop_history") or []
         for entry in hist:
             if entry.get("payload") == sp.invoice_payload and entry.get("status") == "pending":
                 entry["status"] = "success"
-                entry["completed_at"] = datetime.now().isoformat()
+                entry["completed_at"] = now().isoformat()
                 break
         _data["shop_history"] = hist
-        save_data(_data)
     except Exception as e:
         print(f"History update error: {e}")
+    save_data(_data)
 
-    parts = sp.invoice_payload.split("_")
+    # پردازش payload
     try:
+        parts = sp.invoice_payload.split("_")
         amount = int(parts[1])
-    except Exception:
+    except Exception as e:
+        print(f"Payload parse error: {sp.invoice_payload} - {e}")
         return
+
     inv = user.get("inventory", {})
     gm = ""
+
     if len(parts) >= 4 and parts[3] == "phoenix":
-        coins = int(parts[2])
+        try:
+            coins = int(parts[2])
+        except Exception:
+            return
         nc = user["coins"] + coins
         purchased = user.get("purchased_coins", 0) + coins
         update_user(uid, {"coins": nc, "pet": PHOENIX_PET, "phoenix_owned": True,
@@ -3305,10 +3416,12 @@ async def on_successful_payment(message: Message, state: FSMContext):
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
         await message.answer(f"✅ پرداخت!\n🪙 +{format_coins(coins)}\n🦅 ققنوس!", reply_markup=get_keyboard(uid))
         return
+
     try:
         coins = int(parts[2])
     except Exception:
         return
+
     nc = user["coins"] + coins
     purchased = user.get("purchased_coins", 0) + coins
     if amount == 50000:
@@ -3344,7 +3457,7 @@ async def handle_gift_codes(message: Message, state: FSMContext):
     cd = codes[text]
     try:
         end = datetime.fromisoformat(cd["end_time"])
-        if datetime.now() >= end:
+        if now() >= end:
             await message.answer("❌ منقضی شده."); return
     except Exception:
         return
@@ -3441,7 +3554,7 @@ async def clan_request(callback: CallbackQuery):
         await safe_edit(callback, "❌ در کلن دیگه‌ای.", reply_markup=get_keyboard(uid)); return
     data.setdefault("clan_requests", {})[str(uid)] = {
         "clan_id": cid, "clan_name": clan["name"], "user_name": user["name"],
-        "created_at": datetime.now().isoformat()}
+        "created_at": now().isoformat()}
     save_data(data)
     await safe_edit(callback, f"✅ درخواست ارسال شد.", reply_markup=get_keyboard(uid))
     leader_id = clan["leader_id"]
@@ -3578,7 +3691,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         sb = get_pet_effect(user, "speed")
         if sb > 0:
             gt *= (1 - sb / 100)
-        ht = datetime.now() + timedelta(minutes=gt)
+        ht = now() + timedelta(minutes=gt)
         plots[pidx] = {"fruit": fidx, "state": "growing", "harvest_time": ht.isoformat()}
         update_user(uid, {"coins": new_coins, "plots": plots, "current_fruit": fidx})
         update_leaderboard(uid, user["name"], new_coins, user["level"], user["prestige"])
@@ -3594,7 +3707,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             await state.clear()
             await safe_edit(callback, "❌ خطا.", reply_markup=get_keyboard(uid)); return
         new_coins = max(0, user["coins"] - cost)
-        expires = datetime.now() + timedelta(hours=h)
+        expires = now() + timedelta(hours=h)
         workers = user.get("workers", {})
         workers["planting"] = {"active": True, "fruit": fi, "hours": h, "expires_at": expires.isoformat(), "paused": False, "paused_at": None}
         update_user(uid, {"coins": new_coins, "workers": workers})
@@ -3605,7 +3718,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         h = d.get("tr_hours")
         if h is None:
             await state.clear(); return
-        expires = datetime.now() + timedelta(hours=h)
+        expires = now() + timedelta(hours=h)
         workers = user.get("workers", {})
         workers["harvest_sell"] = {"active": True, "hours": h, "expires_at": expires.isoformat(), "paused": False, "paused_at": None}
         update_user(uid, {"workers": workers})
@@ -3697,7 +3810,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
                 "amount_toman": amount,
                 "coins": coins,
                 "status": "pending",
-                "created_at": datetime.now().isoformat(),
+                "created_at": now().isoformat(),
                 "completed_at": None,
                 "payload": pl,
             })
@@ -3778,7 +3891,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         bank["balance"] = bank.get("balance", 0) + final_amount
         history = bank.get("history", [])
         history.append({"type": "deposit", "amount": final_amount, "commission": commission,
-                        "time": datetime.now().isoformat()})
+                        "time": now().isoformat()})
         bank["history"] = history[-50:]
         user["bank"] = bank
         _record_balance(user)
@@ -3794,7 +3907,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             await safe_edit(callback, "❌ کمبود.", reply_markup=get_keyboard(uid)); return
         bank["balance"] -= amt
         history = bank.get("history", [])
-        history.append({"type": "withdraw", "amount": amt, "time": datetime.now().isoformat()})
+        history.append({"type": "withdraw", "amount": amt, "time": now().isoformat()})
         bank["history"] = history[-50:]
         nc = user["coins"] + amt
         user["bank"] = bank
@@ -3819,11 +3932,11 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
         data = load_data()
         data["users"][str(uid)]["bank"]["balance"] -= amt
         th = data["users"][str(uid)]["bank"].setdefault("history", [])
-        th.append({"type": "transfer_out", "amount": amt, "to": tname, "to_acc": acc, "time": datetime.now().isoformat()})
+        th.append({"type": "transfer_out", "amount": amt, "to": tname, "to_acc": acc, "time": now().isoformat()})
         data["users"][str(uid)]["bank"]["history"] = th[-50:]
         data["users"][tid]["bank"]["balance"] = data["users"][tid].get("bank", {}).get("balance", 0) + amt
         ri = data["users"][tid]["bank"].setdefault("history", [])
-        ri.append({"type": "transfer_in", "amount": amt, "from": user.get("name", "?"), "time": datetime.now().isoformat()})
+        ri.append({"type": "transfer_in", "amount": amt, "from": user.get("name", "?"), "time": now().isoformat()})
         data["users"][tid]["bank"]["history"] = ri[-50:]
         _record_balance(data["users"][str(uid)])
         _record_balance(data["users"][tid])
@@ -3842,13 +3955,13 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             await safe_edit(callback, "❌ وام فعال.", reply_markup=get_keyboard(uid)); return
         period_end = get_period_end_datetime(user.get("current_period", 1))
         if period_end:
-            loan_end = datetime.now() + timedelta(hours=hours)
+            loan_end = now() + timedelta(hours=hours)
             if loan_end > period_end:
                 await state.clear()
                 await safe_edit(callback, "❌ بعد از اتمام دوره.", reply_markup=get_keyboard(uid)); return
-        due_time = datetime.now() + timedelta(hours=hours)
+        due_time = now() + timedelta(hours=hours)
         bank["loan"] = {"amount": amt, "total_due": total_due,
-                        "start_time": datetime.now().isoformat(),
+                        "start_time": now().isoformat(),
                         "due_time": due_time.isoformat(), "warning_sent": False}
         bank["loan_snapshot"] = {
             "plots": json.loads(json.dumps(user.get("plots", []))),
@@ -3857,7 +3970,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             "upgrades": json.loads(json.dumps(user.get("upgrades", {}))),
             "workers": json.loads(json.dumps(user.get("workers", {}))),
             "daily_orders": json.loads(json.dumps(user.get("daily_orders", {}))),
-            "saved_at": datetime.now().isoformat(),
+            "saved_at": now().isoformat(),
         }
         nc = user["coins"] + amt
         update_user(uid, {"coins": nc, "bank": bank})
@@ -3908,10 +4021,12 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             return
         data = raw_data
 
-    check_all_harvests(uid)
-    process_workers(uid)
+    # ✅ FIX 5: cooldown برای پردازش‌های سنگین
+    if _should_process(uid):
+        check_all_harvests(uid)
+        process_workers(uid)
     check_period_reset(uid)
-    update_market_prices()
+    # ✅ FIX 4: update_market_prices حذف شد
     update_bank_interest(uid)
     user = get_user(uid)
     if not user:
@@ -3923,18 +4038,18 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         expired = False
         if jail_until_str:
             try:
-                if datetime.now() >= datetime.fromisoformat(jail_until_str):
+                if now() >= datetime.fromisoformat(jail_until_str):
                     expired = True
             except Exception:
                 pass
         if expired:
-            now = datetime.now()
+            n = now()
             bank["in_jail"] = False
             bank["jail_until"] = None
             bank["jail_work_count"] = 0
             bank["jail_ready_to_pay"] = False
             if bank.get("jail_reason") == "loan_overdue":
-                _set_ban_if_not_active(bank, now, days=7)
+                _set_ban_if_not_active(bank, n, days=7)
                 bank["jail_reason"] = None
             user["bank"] = bank
             _reset_after_jail(user, uid)
@@ -3996,14 +4111,14 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         if last_work_str:
             try:
                 last = datetime.fromisoformat(last_work_str)
-                if (datetime.now() - last).total_seconds() < JAIL_WORK_INTERVAL_MIN * 60:
+                if (now() - last).total_seconds() < JAIL_WORK_INTERVAL_MIN * 60:
                     can_work = False
             except Exception:
                 pass
         if not can_work:
             await safe_edit(callback, "⏳ نه هنوز.", reply_markup=get_keyboard(uid)); return
         bank["jail_work_count"] = bank.get("jail_work_count", 0) + 1
-        bank["jail_last_work"] = datetime.now().isoformat()
+        bank["jail_last_work"] = now().isoformat()
         if bank["jail_work_count"] >= bank.get("jail_target_works", 15):
             bank["jail_ready_to_pay"] = True
         update_user(uid, {"bank": bank})
@@ -4012,14 +4127,14 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         return
     if data == "jail_pay":
         bank = user.get("bank", {})
-        now = datetime.now()
+        n = now()
         bank["in_jail"] = False
         bank["jail_until"] = None
         bank["jail_work_count"] = 0
         bank["jail_ready_to_pay"] = False
         bank["loan"] = None
         if bank.get("jail_reason") == "loan_overdue":
-            _set_ban_if_not_active(bank, now, days=7)
+            _set_ban_if_not_active(bank, n, days=7)
             bank["jail_reason"] = None
         user["bank"] = bank
         _reset_after_jail(user, uid)
@@ -4268,7 +4383,7 @@ async def toggle_worker_pause(callback, user, uid, wk):
         paused_at = w.get("paused_at")
         if paused_at:
             try:
-                pause_dur = (datetime.now() - datetime.fromisoformat(paused_at)).total_seconds()
+                pause_dur = (now() - datetime.fromisoformat(paused_at)).total_seconds()
                 old_exp = datetime.fromisoformat(w["expires_at"])
                 new_exp = old_exp + timedelta(seconds=pause_dur)
                 w["expires_at"] = new_exp.isoformat()
@@ -4278,7 +4393,7 @@ async def toggle_worker_pause(callback, user, uid, wk):
         w["paused_at"] = None
     else:
         w["paused"] = True
-        w["paused_at"] = datetime.now().isoformat()
+        w["paused_at"] = now().isoformat()
     workers[wk] = w
     u["workers"] = workers
     _MODIFIED_USERS.add(str(uid))
@@ -4389,7 +4504,7 @@ async def show_bank_menu(callback, user, uid):
         loan = bank["loan"]
         try:
             due = datetime.fromisoformat(loan["due_time"])
-            rem = (due - datetime.now()).total_seconds()
+            rem = (due - now()).total_seconds()
             text += f"\n⚠️ **وام:** {format_coins(loan['amount'])}\n"
             text += f"💵 بازپرداخت: {format_coins(loan['total_due'])}\n"
             text += f"⏰ سررسید: {format_time_remaining(rem)}\n"
@@ -4399,8 +4514,8 @@ async def show_bank_menu(callback, user, uid):
     if banned:
         try:
             bu = datetime.fromisoformat(banned)
-            if datetime.now() < bu:
-                rem = (bu - datetime.now()).total_seconds()
+            if now() < bu:
+                rem = (bu - now()).total_seconds()
                 text += f"\n🚫 منع وام: {format_time_remaining(rem)}\n"
         except Exception:
             pass
@@ -4442,8 +4557,8 @@ async def show_bank_loan(callback, user, uid, state):
     if banned_until:
         try:
             bu = datetime.fromisoformat(banned_until)
-            if datetime.now() < bu:
-                rem = (bu - datetime.now()).total_seconds()
+            if now() < bu:
+                rem = (bu - now()).total_seconds()
                 await safe_edit(callback, f"❌ تا {format_time_remaining(rem)} نمی‌تونی وام بگیری.", reply_markup=get_keyboard(uid)); return
         except Exception:
             pass
@@ -4455,7 +4570,7 @@ async def show_bank_loan(callback, user, uid, state):
             f"📊 حداکثر: **{format_coins(max_loan)}**\n\n"
             f"📈 سود: ۴۰٪ هر ۳۰ دقیقه\n\n")
     if period_end:
-        rem_period = (period_end - datetime.now()).total_seconds()
+        rem_period = (period_end - now()).total_seconds()
         text += f"⏰ پایان دوره: {format_league_time(rem_period)}\n\n"
     text += "💰 مقدار وام:"
     await state.set_state(UserForm.bank_loan_amount)
@@ -4470,7 +4585,7 @@ async def show_pay_loan(callback, user, uid, state):
     total_due = loan.get("total_due", 0)
     try:
         due = datetime.fromisoformat(loan["due_time"])
-        rem = (due - datetime.now()).total_seconds()
+        rem = (due - now()).total_seconds()
     except Exception:
         rem = 0
     text = (f"💳 **فیش پرداخت وام**\n\n"
@@ -4918,7 +5033,7 @@ def _generate_missions(user):
 
 async def show_daily_orders(callback, user, uid):
     do = user.get("daily_orders", {})
-    now = datetime.now()
+    n = now()
     if do.get("completed"):
         next_at_str = do.get("next_at")
         next_at = None
@@ -4927,8 +5042,8 @@ async def show_daily_orders(callback, user, uid):
                 next_at = datetime.fromisoformat(next_at_str)
             except Exception:
                 next_at = None
-        if next_at and now < next_at:
-            rem = (next_at - now).total_seconds()
+        if next_at and n < next_at:
+            rem = (next_at - n).total_seconds()
             await safe_edit(callback,
                 f"📦 **ماموریت‌ها تکمیل شده!**\n\n⏰ ماموریت جدید: **{format_time_remaining(rem)}**",
                 reply_markup=get_keyboard(uid))
@@ -4975,11 +5090,11 @@ async def complete_orders(callback, user, uid):
             del inv[o["fruit"]]
     bonus = int(sum(PRICES[FRUITS.index(o["fruit"])][1] * o["count"] * 1.5 for o in orders) * user["prestige_multiplier"])
     nc = user["coins"] + bonus
-    now = datetime.now()
-    next_at = (now + timedelta(hours=1)).isoformat()
+    n = now()
+    next_at = (n + timedelta(hours=1)).isoformat()
     update_user(uid, {"coins": nc, "inventory": inv,
                        "daily_orders": {"orders": orders, "completed": True,
-                                        "completed_at": now.isoformat(), "next_at": next_at}})
+                                        "completed_at": n.isoformat(), "next_at": next_at}})
     update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
     await safe_edit(callback,
         f"✅ **تکمیل!**\n💰 +{format_coins(bonus)}\n\n⏰ ماموریت جدید: **۱ ساعت دیگه**",
@@ -5058,7 +5173,7 @@ async def show_worker(callback, user, uid):
     if pw.get("active"):
         try:
             exp = datetime.fromisoformat(pw["expires_at"])
-            rem = (exp - datetime.now()).total_seconds()
+            rem = (exp - now()).total_seconds()
             fname = FRUITS[pw["fruit"]] if pw.get("fruit") is not None else "?"
             st = "⏸" if pw.get("paused") else "✅"
             text += f"🌱 **کاشت:** {st} ({fname})\n   ⏰ {format_time_remaining(rem)}\n\n"
@@ -5069,7 +5184,7 @@ async def show_worker(callback, user, uid):
     if hw.get("active"):
         try:
             exp = datetime.fromisoformat(hw["expires_at"])
-            rem = (exp - datetime.now()).total_seconds()
+            rem = (exp - now()).total_seconds()
             st = "⏸" if hw.get("paused") else "✅"
             text += f"💼 **برداشت/فروش:** {st}\n   ⏰ {format_time_remaining(rem)}\n\n"
         except Exception:
@@ -5262,7 +5377,7 @@ async def show_league_menu(callback, user, uid):
     period_end = get_period_end_datetime(pn)
     time_text = "?"
     if period_end:
-        rem = (period_end - datetime.now()).total_seconds()
+        rem = (period_end - now()).total_seconds()
         time_text = format_league_time(rem) if rem > 0 else "به‌زودی..."
 
     text = (f"🏅 **لیگ {lg}** — دوره {pn}\n"
@@ -5330,7 +5445,7 @@ async def buy_prestige(callback, user, uid, state):
     await state.set_state(UserForm.confirm_transfer)
     text = (f"⭐ **پرستیژ {nx}**\n\n💰 **{format_coins(p)}**\n"
             f"⭐ ضریب جدید: **{user['prestige_multiplier']*1.5:.2f}x**\n\n"
-            f"⚠️ **ریست:** سکه، لول، XP، انبار، زمین‌ها، ارتقاءها\n"
+            f"⚠️ **ریست:** سکه، لول، XP، انبار، زمین‌ها، ارتقاءها، پول‌های خریداری‌شده\n"
             f"✅ **باقی:** نام، پرستیژ، کلن، ققنوس، افتخارات، حساب بانکی\n\nمطمئنی؟")
     kb = InlineKeyboardBuilder()
     kb.button("✅ تأیید", callback_data="confirm_yes")
@@ -5424,8 +5539,9 @@ async def handle_text_commands(message: Message, state: FSMContext):
     uid = message.from_user.id
     user = get_user(uid)
     if user and user.get("bank", {}).get("in_jail"):
-        check_all_harvests(uid)
-        process_workers(uid)
+        if _should_process(uid):
+            check_all_harvests(uid)
+            process_workers(uid)
         check_period_reset(uid)
         user = get_user(uid)
         await check_jail_and_block(message, user, uid)
@@ -5435,10 +5551,10 @@ async def handle_text_commands(message: Message, state: FSMContext):
     action = TEXT_COMMANDS[txt]
     if is_banned(uid):
         return
-    check_all_harvests(uid)
-    process_workers(uid)
+    if _should_process(uid):
+        check_all_harvests(uid)
+        process_workers(uid)
     check_period_reset(uid)
-    update_market_prices()
     update_bank_interest(uid)
     user = get_user(uid)
     if not user:
@@ -5506,13 +5622,14 @@ async def trim_loop():
 async def main():
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     print(f"🤖 ربات روشن شد... Admin IDs: {ADMIN_IDS}")
+    print(f"🕐 Timezone: Tehran (UTC+3:30) - Now: {now()}")
 
     load_data()
     print("✅ Data loaded")
 
     _data_tmp = load_data()
     if "market" in _data_tmp:
-        _data_tmp["market"]["last_update"] = datetime.now().isoformat()
+        _data_tmp["market"]["last_update"] = now().isoformat()
         save_data(_data_tmp)
         print("✅ Market time reset")
 
