@@ -45,15 +45,15 @@ _LAST_CLAN_JSON = {}
 _LAST_GLOBAL_JSON = ""
 _MODIFIED_USERS = set()
 
-# ✅ FIX 5: cache برای جلوگیری از پردازش مکرر
-_LAST_PROCESS_CACHE = {}   # uid -> timestamp
-_PROCESS_COOLDOWN = 5      # ثانیه
+_LAST_PROCESS_CACHE = {}
+_PROCESS_COOLDOWN = 5
 
-# ✅ FIX 21: Timezone تهران
+# ✅ FIX 3: قفل پردازش پرداخت (برای race condition)
+_PAYMENT_LOCK = None
+
 TEHRAN_OFFSET = timedelta(hours=3, minutes=30)
 
 def now():
-    """زمان فعلی به وقت تهران (naive)"""
     return datetime.utcnow() + TEHRAN_OFFSET
 
 GLOBAL_KEYS = ["game_start_time", "first_run_time", "leaderboard", "leagues",
@@ -197,7 +197,6 @@ TEXT_COMMANDS = {
 }
 
 
-# ✅ FIX 14: is_admin مقاوم
 def is_admin(user_id):
     try:
         return int(user_id) in ADMIN_IDS
@@ -298,7 +297,6 @@ async def safe_edit(callback, text, **kwargs):
             pass
 
 
-# ✅ FIX 5: تابع چک cooldown
 def _should_process(uid):
     t = _time.time()
     last = _LAST_PROCESS_CACHE.get(str(uid), 0)
@@ -306,6 +304,31 @@ def _should_process(uid):
         return False
     _LAST_PROCESS_CACHE[str(uid)] = t
     return True
+
+
+# ✅ FIX 4: تابع ساخت قیمت مقاوم
+def _make_price(label, amount):
+    """ساخت قیمت با fallback"""
+    if HAS_LABELED_PRICE:
+        try:
+            return LabeledPrice(label=label, amount=amount)
+        except Exception as e:
+            print(f"LabeledPrice error: {e}")
+    return {"label": label, "amount": amount}
+
+
+# ✅ FIX 2: تشخیص قوی charge_id
+def _get_charge_id(sp):
+    """تلاش برای پیدا کردن charge_id از منابع مختلف"""
+    for attr in ("bale_payment_charge_id", "provider_payment_charge_id",
+                 "telegram_payment_charge_id", "charge_id"):
+        v = getattr(sp, attr, None)
+        if v:
+            return f"c_{v}"
+    # fallback: از payload + total_amount + timestamp user
+    payload = getattr(sp, "invoice_payload", "")
+    total = getattr(sp, "total_amount", 0)
+    return f"f_{payload}_{total}"
 
 
 def _ensure_dirs():
@@ -651,7 +674,7 @@ async def saver_loop():
     _SAVE_TRIGGER = asyncio.Event()
     while True:
         try:
-            await asyncio.wait_for(_SAVE_TRIGGER.wait(), timeout=120)  # ✅ FIX 22
+            await asyncio.wait_for(_SAVE_TRIGGER.wait(), timeout=120)
         except asyncio.TimeoutError:
             pass
         _SAVE_TRIGGER.clear()
@@ -691,7 +714,7 @@ async def user_process_loop():
             await asyncio.to_thread(process_all_users)
         except Exception as e:
             print(f"❌ User process loop: {e}")
-        await asyncio.sleep(90)  # ✅ FIX 23
+        await asyncio.sleep(90)
 
 
 def trim_old_data():
@@ -747,14 +770,48 @@ def trim_old_data():
         del reqs[uid]
         changed = True
 
-    # ✅ FIX 2: trim processed_charges
     pc = data.get("processed_charges") or []
     if len(pc) > 2000:
         data["processed_charges"] = pc[-1000:]
         changed = True
 
+    # ✅ FIX 6: چک پرداخت‌های stale
+    _check_stale_pending(data, n)
+
     if changed:
         save_data(data)
+
+
+# ✅ FIX 6: گزارش پرداخت‌های معلق
+def _check_stale_pending(data, n):
+    """چک پرداخت‌های pending که بیش از ۳۰ دقیقه معلق موندن"""
+    sh = data.get("shop_history") or []
+    for e in sh:
+        if e.get("status") == "pending" and not e.get("stale_notified"):
+            try:
+                created = datetime.fromisoformat(e["created_at"])
+                mins = (n - created).total_seconds() / 60
+                if mins > 30:
+                    e["stale_notified"] = True
+                    print(f"⚠️ STALE PENDING: uid={e.get('user_id')}, "
+                          f"amount={e.get('amount_toman')} تومان, "
+                          f"mins={int(mins)}, payload={e.get('payload')}")
+                    # اطلاع به ادمین‌ها
+                    for admin_id in ADMIN_IDS:
+                        try:
+                            asyncio.create_task(bot.send_message(
+                                admin_id,
+                                f"⚠️ **پرداخت معلق**\n\n"
+                                f"👤 کاربر: `{e.get('user_id')}`\n"
+                                f"💰 مبلغ: {e.get('amount_toman'):,} تومان\n"
+                                f"🪙 سکه: {format_coins(e.get('coins', 0))}\n"
+                                f"⏰ معلق از: {int(mins)} دقیقه پیش\n"
+                                f"📝 payload: `{e.get('payload')}`"
+                            ))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
 
 def _record_balance(user, n=None):
@@ -950,7 +1007,6 @@ def get_season_effects():
     elif season == "summer":
         e["golden_chance"] = 0.02 * 1.75
     elif season == "autumn":
-        # ✅ FIX 1: مقدار ثابت بر اساس ساعت (به جای random)
         current_minute = int(_time.time() // 60)
         rng = random.Random(current_minute)
         e["sell_mult"] = rng.uniform(1.25, 1.5)
@@ -1097,7 +1153,6 @@ def process_period_end(pn, user, uid_str):
 
 
 def check_period_reset(user_id):
-    # ✅ FIX 10: فقط دوره آخر پردازش می‌شه
     data = load_data()
     cp = get_period_number()
     user = data["users"].get(str(user_id))
@@ -1105,7 +1160,6 @@ def check_period_reset(user_id):
         return False
     lp = user.get("last_seen_period", cp)
     if cp > lp:
-        # فقط آخرین دوره
         process_period_end(cp - 1, user, str(user_id))
         user["period_start_coins"] = user["coins"]
         user["period_start_time"] = now().isoformat()
@@ -1358,7 +1412,6 @@ def apply_interest_all_users():
 
 
 def get_avg_balance_24h(user):
-    # ✅ FIX 12: نرمال‌سازی برای تاریخچه ناقص
     bank = user.get("bank", {})
     n = now()
     cutoff = n - timedelta(hours=24)
@@ -1377,10 +1430,8 @@ def get_avg_balance_24h(user):
     if not entries:
         return current
 
-    # پیدا کردن قدیمی‌ترین entry
     oldest_t = entries[0][0]
     if oldest_t > cutoff:
-        # تاریخچه کمتر از ۲۴ ساعت
         start_t = oldest_t
         span = (n - start_t).total_seconds()
         if span < 60:
@@ -1702,7 +1753,7 @@ def process_all_users():
     global _MODIFIED_USERS
     data = load_data()
     n = now()
-    cutoff = n - timedelta(days=7)  # ✅ FIX 8: ۷ روز به جای ۲۴ ساعت
+    cutoff = n - timedelta(days=7)
     effects, _ = get_season_effects()
     any_changed = False
 
@@ -2331,7 +2382,6 @@ async def cmd_give_pet(message: Message):
 
 @dp.message(Command("reset_user"))
 async def cmd_reset_user(message: Message):
-    # ✅ FIX 20: حفظ شماره حساب
     if not is_admin(message.from_user.id):
         return
     p = message.text.split()
@@ -2369,7 +2419,6 @@ async def cmd_reset_user(message: Message):
     data = load_data()
     data["users"][p[1]] = nu
     _MODIFIED_USERS.add(p[1])
-    # ✅ FIX 9: پاک کردن از cache
     _LAST_USER_JSON.pop(p[1], None)
     _LAST_PROCESS_CACHE.pop(p[1], None)
     save_data(data)
@@ -2553,7 +2602,6 @@ async def cmd_shop_history(message: Message):
 
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: Message):
-    # ✅ FIX 17: ارسال همزمان با محدودیت
     if not is_admin(message.from_user.id):
         return
     txt = message.text.replace("/broadcast", "", 1).strip()
@@ -2734,12 +2782,10 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     if is_banned(user_id):
         await message.answer("🚫 شما بن شده‌اید."); return
-    # ✅ FIX 5: cooldown
     if _should_process(user_id):
         check_all_harvests(user_id)
         process_workers(user_id)
     check_period_reset(user_id)
-    # ✅ FIX 4: update_market_prices حذف شد (فقط در market_loop)
     user = get_user(user_id)
     if not user or user.get("name", "") == "":
         await state.set_state(UserForm.name)
@@ -2763,7 +2809,6 @@ async def cmd_status(message: Message, state: FSMContext):
         check_all_harvests(uid)
         process_workers(uid)
     check_period_reset(uid)
-    # ✅ FIX 4: update_market_prices حذف شد
     update_bank_interest(uid)
     user = get_user(uid)
     if not user:
@@ -3335,107 +3380,129 @@ async def market_sell_amount_input(message: Message, state: FSMContext):
 
 @dp.pre_checkout_query()
 async def on_pre_checkout(query: PreCheckoutQuery):
-    # ✅ FIX: سریع جواب بده
     try:
         await query.answer(ok=True)
     except Exception:
         pass
 
 
-@dp.message(F.successful_payment)
-async def on_successful_payment(message: Message, state: FSMContext):
-    # ✅ FIX 2: dedup با charge_id
+# ✅ FIX 1 + 2 + 3: پردازش پرداخت با قفل و تشخیص چندگانه
+async def _process_successful_payment(message: Message, state: FSMContext):
+    global _PAYMENT_LOCK
+
+    # init lock در اولین فراخوانی
+    if _PAYMENT_LOCK is None:
+        _PAYMENT_LOCK = asyncio.Lock()
+
     try:
         await state.clear()
     except Exception:
         pass
 
-    sp = message.successful_payment
+    sp = getattr(message, "successful_payment", None)
+    if not sp:
+        return
+
     uid = message.from_user.id
 
-    # dedup
-    charge_id = None
-    for attr in ("bale_payment_charge_id", "provider_payment_charge_id",
-                 "telegram_payment_charge_id"):
-        v = getattr(sp, attr, None)
-        if v:
-            charge_id = v
-            break
-    if not charge_id:
-        charge_id = sp.invoice_payload + "_" + str(getattr(sp, "total_amount", 0))
+    async with _PAYMENT_LOCK:
+        # ✅ FIX 2: تشخیص charge_id
+        charge_id = _get_charge_id(sp)
 
-    _data = load_data()
-    processed = _data.get("processed_charges") or []
-    if charge_id in processed:
+        _data = load_data()
+        processed = _data.get("processed_charges") or []
+        if charge_id in processed:
+            print(f"⚠️ Duplicate payment ignored: {charge_id}")
+            try:
+                await message.answer("⚠️ این پرداخت قبلاً ثبت شده است.")
+            except Exception:
+                pass
+            return
+        processed.append(charge_id)
+        _data["processed_charges"] = processed[-2000:]
+
+        user = get_user(uid)
+        if not user:
+            save_data(_data)
+            return
+
+        # history
         try:
-            await message.answer("⚠️ این پرداخت قبلاً ثبت شده است.")
-        except Exception:
-            pass
-        return
-    processed.append(charge_id)
-    _data["processed_charges"] = processed[-2000:]
-
-    user = get_user(uid)
-    if not user:
+            hist = _data.get("shop_history") or []
+            for entry in hist:
+                if entry.get("payload") == sp.invoice_payload and entry.get("status") == "pending":
+                    entry["status"] = "success"
+                    entry["completed_at"] = now().isoformat()
+                    break
+            _data["shop_history"] = hist
+        except Exception as e:
+            print(f"History update error: {e}")
         save_data(_data)
-        return
 
-    # history
-    try:
-        hist = _data.get("shop_history") or []
-        for entry in hist:
-            if entry.get("payload") == sp.invoice_payload and entry.get("status") == "pending":
-                entry["status"] = "success"
-                entry["completed_at"] = now().isoformat()
-                break
-        _data["shop_history"] = hist
-    except Exception as e:
-        print(f"History update error: {e}")
-    save_data(_data)
+        # parse payload
+        try:
+            parts = sp.invoice_payload.split("_")
+            amount = int(parts[1])
+        except Exception as e:
+            print(f"Payload parse error: {sp.invoice_payload} - {e}")
+            try:
+                await message.answer(
+                    "⚠️ پرداخت دریافت شد ولی خطا در پردازش.\n"
+                    "با پشتیبانی تماس بگیرید."
+                )
+            except Exception:
+                pass
+            return
 
-    # پردازش payload
-    try:
-        parts = sp.invoice_payload.split("_")
-        amount = int(parts[1])
-    except Exception as e:
-        print(f"Payload parse error: {sp.invoice_payload} - {e}")
-        return
+        inv = user.get("inventory", {})
+        gm = ""
 
-    inv = user.get("inventory", {})
-    gm = ""
+        if len(parts) >= 4 and parts[3] == "phoenix":
+            try:
+                coins = int(parts[2])
+            except Exception:
+                return
+            nc = user["coins"] + coins
+            purchased = user.get("purchased_coins", 0) + coins
+            update_user(uid, {"coins": nc, "pet": PHOENIX_PET, "phoenix_owned": True,
+                              "pending_purchase": None, "purchased_coins": purchased})
+            update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
+            try:
+                await message.answer(f"✅ پرداخت!\n🪙 +{format_coins(coins)}\n🦅 ققنوس!", reply_markup=get_keyboard(uid))
+            except Exception:
+                pass
+            return
 
-    if len(parts) >= 4 and parts[3] == "phoenix":
         try:
             coins = int(parts[2])
         except Exception:
             return
+
         nc = user["coins"] + coins
         purchased = user.get("purchased_coins", 0) + coins
-        update_user(uid, {"coins": nc, "pet": PHOENIX_PET, "phoenix_owned": True,
-                          "pending_purchase": None, "purchased_coins": purchased})
+        if amount == 50000:
+            fi = random.choice(get_available_fruits(user))
+            inv[FRUITS[fi]] = inv.get(FRUITS[fi], 0) + 1
+            gm = f"\n🎁 {FRUITS[fi]}"
+        elif amount == 100000:
+            fi = random.randint(0, len(FRUITS) - 1)
+            inv[f"طلایی_{FRUITS[fi]}"] = inv.get(f"طلایی_{FRUITS[fi]}", 0) + 1
+            gm = f"\n✨ طلایی {FRUITS[fi]}"
+
+        update_user(uid, {"coins": nc, "inventory": inv, "pending_purchase": None,
+                          "purchased_coins": purchased})
         update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
-        await message.answer(f"✅ پرداخت!\n🪙 +{format_coins(coins)}\n🦅 ققنوس!", reply_markup=get_keyboard(uid))
-        return
+        try:
+            await message.answer(f"✅ پرداخت!\n🪙 +{format_coins(coins)}\n💼 {format_coins(nc)}{gm}", reply_markup=get_keyboard(uid))
+        except Exception:
+            pass
 
-    try:
-        coins = int(parts[2])
-    except Exception:
-        return
 
-    nc = user["coins"] + coins
-    purchased = user.get("purchased_coins", 0) + coins
-    if amount == 50000:
-        fi = random.choice(get_available_fruits(user))
-        inv[FRUITS[fi]] = inv.get(FRUITS[fi], 0) + 1
-        gm = f"\n🎁 {FRUITS[fi]}"
-    elif amount == 100000:
-        fi = random.randint(0, len(FRUITS) - 1)
-        inv[f"طلایی_{FRUITS[fi]}"] = inv.get(f"طلایی_{FRUITS[fi]}", 0) + 1
-        gm = f"\n✨ طلایی {FRUITS[fi]}"
-    update_user(uid, {"coins": nc, "inventory": inv, "pending_purchase": None,
-                      "purchased_coins": purchased})
-    update_leaderboard(uid, user["name"], nc, user["level"], user["prestige"])
-    await message.answer(f"✅ پرداخت!\n🪙 +{format_coins(coins)}\n💼 {format_coins(nc)}{gm}", reply_markup=get_keyboard(uid))
+# ✅ FIX 1: هندلر اصلی (specific)
+@dp.message(F.successful_payment)
+async def on_successful_payment(message: Message, state: FSMContext):
+    print(f"💰 Payment via F.successful_payment: uid={message.from_user.id}")
+    await _process_successful_payment(message, state)
 
 
 @dp.message(F.text.startswith("/"))
@@ -3818,10 +3885,7 @@ async def confirm_transfer_yes(callback: CallbackQuery, state: FSMContext):
             save_data(_data)
             kwargs = dict(chat_id=uid, title=ti, description=de,
                           payload=pl, provider_token=PROVIDER_TOKEN)
-            if HAS_LABELED_PRICE:
-                kwargs["prices"] = [LabeledPrice(label=format_coins(coins), amount=r)]
-            else:
-                kwargs["prices"] = [{"label": format_coins(coins), "amount": r}]
+            kwargs["prices"] = [_make_price(format_coins(coins), r)]
             await bot.send_invoice(**kwargs)
         except Exception as e:
             print(f"Invoice error: {e}")
@@ -4021,12 +4085,10 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
             return
         data = raw_data
 
-    # ✅ FIX 5: cooldown برای پردازش‌های سنگین
     if _should_process(uid):
         check_all_harvests(uid)
         process_workers(uid)
     check_period_reset(uid)
-    # ✅ FIX 4: update_market_prices حذف شد
     update_bank_interest(uid)
     user = get_user(uid)
     if not user:
@@ -5526,8 +5588,15 @@ async def show_achievements(callback, user, uid):
     await safe_edit(callback, text, reply_markup=get_keyboard(uid))
 
 
+# ✅ FIX 1: catch-all با fallback برای successful_payment
 @dp.message()
 async def handle_text_commands(message: Message, state: FSMContext):
+    # ✅ FIX 1: اگه F.successful_payment کار نکرد، اینجا چک کن
+    if getattr(message, "successful_payment", None):
+        print(f"💰 Payment via fallback: uid={message.from_user.id}")
+        await _process_successful_payment(message, state)
+        return
+
     if not message.text:
         return
     txt = message.text.strip()
