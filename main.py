@@ -48,7 +48,6 @@ _MODIFIED_USERS = set()
 _LAST_PROCESS_CACHE = {}
 _PROCESS_COOLDOWN = 5
 
-# ✅ FIX 3: قفل پردازش پرداخت (برای race condition)
 _PAYMENT_LOCK = None
 
 TEHRAN_OFFSET = timedelta(hours=3, minutes=30)
@@ -194,6 +193,7 @@ TEXT_COMMANDS = {
     "برداشت": "harvest_text", "برداشت کن": "harvest_text",
     "بازار": "market_menu", "market": "market_menu",
     "بانک": "bank_menu", "bank": "bank_menu",
+    "راهنما": "guide", "help": "guide", "کمک": "guide",
 }
 
 
@@ -306,9 +306,7 @@ def _should_process(uid):
     return True
 
 
-# ✅ FIX 4: تابع ساخت قیمت مقاوم
 def _make_price(label, amount):
-    """ساخت قیمت با fallback"""
     if HAS_LABELED_PRICE:
         try:
             return LabeledPrice(label=label, amount=amount)
@@ -317,15 +315,12 @@ def _make_price(label, amount):
     return {"label": label, "amount": amount}
 
 
-# ✅ FIX 2: تشخیص قوی charge_id
 def _get_charge_id(sp):
-    """تلاش برای پیدا کردن charge_id از منابع مختلف"""
     for attr in ("bale_payment_charge_id", "provider_payment_charge_id",
                  "telegram_payment_charge_id", "charge_id"):
         v = getattr(sp, attr, None)
         if v:
             return f"c_{v}"
-    # fallback: از payload + total_amount + timestamp user
     payload = getattr(sp, "invoice_payload", "")
     total = getattr(sp, "total_amount", 0)
     return f"f_{payload}_{total}"
@@ -775,16 +770,13 @@ def trim_old_data():
         data["processed_charges"] = pc[-1000:]
         changed = True
 
-    # ✅ FIX 6: چک پرداخت‌های stale
     _check_stale_pending(data, n)
 
     if changed:
         save_data(data)
 
 
-# ✅ FIX 6: گزارش پرداخت‌های معلق
 def _check_stale_pending(data, n):
-    """چک پرداخت‌های pending که بیش از ۳۰ دقیقه معلق موندن"""
     sh = data.get("shop_history") or []
     for e in sh:
         if e.get("status") == "pending" and not e.get("stale_notified"):
@@ -796,7 +788,6 @@ def _check_stale_pending(data, n):
                     print(f"⚠️ STALE PENDING: uid={e.get('user_id')}, "
                           f"amount={e.get('amount_toman')} تومان, "
                           f"mins={int(mins)}, payload={e.get('payload')}")
-                    # اطلاع به ادمین‌ها
                     for admin_id in ADMIN_IDS:
                         try:
                             asyncio.create_task(bot.send_message(
@@ -1888,6 +1879,7 @@ def get_keyboard(user_id):
         kb.button("⭐ پرستیژ", callback_data=f"{prefix}prestige_menu")
     if is_admin(user_id):
         kb.button("👑 Admin Panel", callback_data=f"{prefix}admin_panel")
+    kb.button("📖 راهنما", callback_data=f"{prefix}guide")
     kb.adjust(2)
     return kb.as_markup()
 
@@ -2824,6 +2816,21 @@ async def cmd_myid(message: Message):
     await message.answer(f"🆔 آیدی عددی شما:\n`{message.from_user.id}`")
 
 
+@dp.message(Command("help"))
+async def cmd_help(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    user = get_user(uid)
+    if not user:
+        await message.answer("❌ اول /start"); return
+    fake = FakeCallback(message, data=f"owner_{uid}_guide")
+    await show_guide(fake, user, uid)
+
+
+@dp.message(Command("guide"))
+async def cmd_guide(message: Message, state: FSMContext):
+    await cmd_help(message, state)
+
+
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
@@ -3386,11 +3393,9 @@ async def on_pre_checkout(query: PreCheckoutQuery):
         pass
 
 
-# ✅ FIX 1 + 2 + 3: پردازش پرداخت با قفل و تشخیص چندگانه
 async def _process_successful_payment(message: Message, state: FSMContext):
     global _PAYMENT_LOCK
 
-    # init lock در اولین فراخوانی
     if _PAYMENT_LOCK is None:
         _PAYMENT_LOCK = asyncio.Lock()
 
@@ -3406,7 +3411,6 @@ async def _process_successful_payment(message: Message, state: FSMContext):
     uid = message.from_user.id
 
     async with _PAYMENT_LOCK:
-        # ✅ FIX 2: تشخیص charge_id
         charge_id = _get_charge_id(sp)
 
         _data = load_data()
@@ -3426,7 +3430,6 @@ async def _process_successful_payment(message: Message, state: FSMContext):
             save_data(_data)
             return
 
-        # history
         try:
             hist = _data.get("shop_history") or []
             for entry in hist:
@@ -3439,7 +3442,6 @@ async def _process_successful_payment(message: Message, state: FSMContext):
             print(f"History update error: {e}")
         save_data(_data)
 
-        # parse payload
         try:
             parts = sp.invoice_payload.split("_")
             amount = int(parts[1])
@@ -3498,7 +3500,6 @@ async def _process_successful_payment(message: Message, state: FSMContext):
             pass
 
 
-# ✅ FIX 1: هندلر اصلی (specific)
 @dp.message(F.successful_payment)
 async def on_successful_payment(message: Message, state: FSMContext):
     print(f"💰 Payment via F.successful_payment: uid={message.from_user.id}")
@@ -3514,7 +3515,8 @@ async def handle_gift_codes(message: Message, state: FSMContext):
              "/reset_user", "/ban", "/unban", "/stats", "/broadcast",
              "/reset_season", "/reset_league", "/event", "/end_event", "/events",
              "/giftcode", "/myid", "/cancel", "/market",
-             "/fix_leaderboard", "/fix_clans", "/shophistory"]
+             "/fix_leaderboard", "/fix_clans", "/shophistory",
+             "/help", "/guide"]
     if text.split()[0] in known:
         return
     data = load_data()
@@ -4229,6 +4231,8 @@ async def on_callback(callback: CallbackQuery, state: FSMContext):
         return
     elif data == "status":
         await edit_status(callback, user, uid)
+    elif data == "guide":
+        await show_guide(callback, user, uid)
     elif data == "admin_panel":
         await show_admin_panel(callback, uid)
     elif data == "bank_menu":
@@ -5588,10 +5592,88 @@ async def show_achievements(callback, user, uid):
     await safe_edit(callback, text, reply_markup=get_keyboard(uid))
 
 
-# ✅ FIX 1: catch-all با fallback برای successful_payment
+async def show_guide(callback, user, uid):
+    text = (
+        "📖 **راهنمای لول‌ها**\n\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "🌱 **لول ۱ — شروع**\n"
+        "XP لازم برای لول بعدی: ۵\n\n"
+        "🍎 **میوه‌های قابل کاشت:**\n"
+        "• 🍓 توت‌فرنگی\n\n"
+        "🎯 **امکانات فعال:**\n"
+        "• 📊 وضعیت\n"
+        "• 🐾 پت (حیوان خانگی)\n"
+        "• 🏦 بانک\n\n"
+        "📦 **ظرفیت انبار:**\n"
+        "• ۱ آیتم\n\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "🌿 **لول ۲ — اولین قدم**\n"
+        "XP لازم برای لول بعدی: ۳۰\n\n"
+        "🍎 **میوه‌های جدید:**\n"
+        "• 🍅 گوجه\n\n"
+        "🎯 **امکانات جدید:**\n"
+        "• 🏆 لیدربرد (رتبه‌بندی)\n"
+        "• 📦 ماموریت‌های روزانه\n\n"
+        "📦 **ظرفیت انبار:**\n"
+        "• ۲ آیتم\n\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "🌾 **لول ۳ — گسترش**\n"
+        "XP لازم برای لول بعدی: ۷۵\n\n"
+        "🍎 **میوه‌های جدید:**\n"
+        "• 🍎 سیب\n\n"
+        "🎯 **امکانات جدید:**\n"
+        "• 🔧 ارتقاء ابزار\n"
+        "• 💹 بازار\n\n"
+        "📦 **ظرفیت انبار:**\n"
+        "• ۳ آیتم\n\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "🌳 **لول ۴ — تجارت**\n"
+        "XP لازم برای لول بعدی: ۲۵۰\n\n"
+        "🍎 **میوه‌های جدید:**\n"
+        "• 🍊 پرتقال\n\n"
+        "🎯 **امکانات جدید:**\n"
+        "• 🛒 فروشگاه سکه (خرید با پول واقعی)\n\n"
+        "📦 **ظرفیت انبار:**\n"
+        "• ۵ آیتم\n\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "🏡 **لول ۵ — مدیریت**\n"
+        "XP لازم برای لول بعدی: ۱۰۰۰\n\n"
+        "🍎 **میوه‌های جدید:**\n"
+        "• 🥥 نارگیل\n\n"
+        "🎯 **امکانات جدید:**\n"
+        "• 👷 کارگرها (کاشت + برداشت/فروش)\n"
+        "• 🏰 کلن (اتحاد)\n\n"
+        "📦 **ظرفیت انبار:**\n"
+        "• ۸ آیتم\n\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "🏘️ **لول ۶ — امپراتوری**\n"
+        "XP لازم برای لول بعدی: ۵۰۰۰\n\n"
+        "🍎 **میوه‌های جدید:**\n"
+        "• 🍍 آناناس\n\n"
+        "🎯 **امکانات جدید:**\n"
+        "• ⚠️ هیچ‌چیز جدیدی باز نمی‌شه\n\n"
+        "📦 **ظرفیت انبار:**\n"
+        "• ۱۲ آیتم\n\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "👑 **لول ۷ — اوج (آخرین لول)**\n"
+        "XP لازم برای لول بعدی: —\n\n"
+        "🍎 **میوه‌های جدید:**\n"
+        "• 🐉 میوه اژدها (گران‌ترین میوه!)\n\n"
+        "🎯 **امکانات جدید:**\n"
+        "• ⭐ پرستیژ (شروع مجدد با ضریب بالاتر)\n"
+        "• 🏅 لیگ (رقابت با بازیکنان پرستیژ)\n"
+        "• 🎖️ افتخارات (مدال و جایزه)\n\n"
+        "📦 **ظرفیت انبار:**\n"
+        "• ۲۰ آیتم"
+    )
+    kb = InlineKeyboardBuilder()
+    kb.button("🔙 بازگشت", callback_data=f"owner_{uid}_back")
+    kb.adjust(1)
+    await safe_edit(callback, text, reply_markup=kb.as_markup())
+
+
 @dp.message()
 async def handle_text_commands(message: Message, state: FSMContext):
-    # ✅ FIX 1: اگه F.successful_payment کار نکرد، اینجا چک کن
     if getattr(message, "successful_payment", None):
         print(f"💰 Payment via fallback: uid={message.from_user.id}")
         await _process_successful_payment(message, state)
